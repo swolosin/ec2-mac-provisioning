@@ -57,7 +57,7 @@ INSERT INTO access (
   indirect_object_code_identity, flags, last_modified,
   pid, pid_version, boot_uuid, last_reminded
 ) VALUES (
-  '$service', '$CLIENT', 1, 2, 4, 1,
+  '$service', '$CLIENT', 1, 2, 3, 1,
   X'$client_hex', NULL, 0, '$target',
   $target_blob, 0, CAST(strftime('%s','now') AS INTEGER),
   NULL, NULL, 'UNUSED', 0
