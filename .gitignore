@@ -1,0 +1,41 @@
+# macOS system files
+.DS_Store
+.DS_Store?
+.localized
+.__MACOSX
+._*
+.Spotlight-V100
+.Trashes
+.AppleDB
+.AppleDesktop
+.apdisk
+Network Trash Folder/
+Temporary Items/
+
+# Credentials and secrets — never commit these
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+.env
+.env.*
+
+# AWS temporary files
+tmpCredentials
+*credentials*.json
+
+# Shell script artifacts
+*.log
+*.tmp
+
+# Editor artifacts
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
