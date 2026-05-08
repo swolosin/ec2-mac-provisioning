@@ -91,7 +91,7 @@ Wait for the AMI status to show `available` and the backing snapshot to show `co
 
 ## What happens on instances launched from the AMI
 
-1. AWS re-enables SIP (multiple reboots, up to 90 min)
+1. Instance boots with SIP enabled — SIP is a firmware-level setting, not stored on the EBS volume, so new instances always start with SIP enabled by default
 2. ec2-macos-init runs fresh — `ManageEC2User` skips password randomization (`RandomizePassword = false`), SSH keys are injected, user data runs if specified
 3. Auto-login fires for ec2-user
 4. LaunchAgent triggers `enroll-ec2-mac.scpt`
