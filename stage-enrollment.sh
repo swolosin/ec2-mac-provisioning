@@ -282,13 +282,17 @@ echo ""
 # =====================================================
 
 # =====================================================
-# Phase 8: Clean ec2-macos-init history
+# Phase 8: Configure ec2-macos-init
 # =====================================================
 
-echo "=== Phase 8: Clean ec2-macos-init history ==="
+echo "=== Phase 8: Configure ec2-macos-init ==="
 
-/usr/bin/sudo /usr/local/bin/ec2-macos-init clean --all 2>&1 || \
-  /usr/bin/sudo /usr/local/aws/ec2-macos-init/ec2-macos-init clean --all 2>&1
+echo "Setting RandomizePassword = false in init.toml..."
+/usr/bin/sudo /usr/bin/sed -i '' 's/RandomizePassword = true/RandomizePassword = false/' /usr/local/aws/ec2-macos-init/init.toml
+/usr/bin/grep "RandomizePassword" /usr/local/aws/ec2-macos-init/init.toml
+
+echo "Clearing ec2-macos-init instance history..."
+/usr/bin/sudo /usr/local/bin/ec2-macos-init clean --all 2>&1
 echo "ec2-macos-init history cleared."
 
 echo ""
