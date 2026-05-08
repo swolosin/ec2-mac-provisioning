@@ -281,6 +281,24 @@ echo ""
 # Done
 # =====================================================
 
+# =====================================================
+# Phase 8: Clean ec2-macos-init history
+# =====================================================
+
+echo "=== Phase 8: Clean ec2-macos-init history ==="
+
+/usr/bin/sudo /usr/local/bin/ec2-macos-init clean --all 2>&1 || \
+  /usr/bin/sudo /usr/local/aws/ec2-macos-init/ec2-macos-init clean --all 2>&1
+echo "ec2-macos-init history cleared."
+
+echo ""
+echo "=== Phase 8 complete ==="
+echo ""
+
+# =====================================================
+# Done
+# =====================================================
+
 echo "$(/bin/date): stage-enrollment completed successfully."
 echo ""
 echo "This instance is ready for AMI creation."
