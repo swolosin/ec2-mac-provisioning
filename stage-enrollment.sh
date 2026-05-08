@@ -194,6 +194,60 @@ echo "Downloaded: $ENROLL_SCRIPT ($(/usr/bin/wc -c < "$ENROLL_SCRIPT" | /usr/bin
 echo "Waiting 5 seconds for filesystem to settle..."
 /bin/sleep 5
 
+echo "Patching enroll-ec2-mac.scpt for macOS 26 Device Management navigation..."
+/usr/bin/osadecompile "$ENROLL_SCRIPT" > /tmp/enroll-source.applescript
+
+python3 << 'PYEOF'
+with open('/tmp/enroll-source.applescript', 'r') as f:
+    lines = f.readlines()
+
+sidebar_repeat_line = next((i for i, l in enumerate(lines) if 'repeat with sidebarSearch from 2 to 8' in l), None)
+sidebar_target_tell_line = next((i for i, l in enumerate(lines) if 'to tell sidebarTarget' in l), None)
+
+if sidebar_repeat_line is None or sidebar_target_tell_line is None:
+    print("WARN: sidebarTarget patch target not found — skipping (script may already be fixed)")
+    exit(0)
+
+t = '\t' * (len(lines[sidebar_repeat_line]) - len(lines[sidebar_repeat_line].lstrip('\t')))
+end_try_line = next(i for i in range(sidebar_target_tell_line, len(lines)) if lines[i].strip() == 'end try')
+
+new_lines = []
+new_lines.extend(lines[:sidebar_repeat_line])
+new_lines.append(t + 'set sidebarTarget to false\n')
+new_lines.extend(lines[sidebar_repeat_line:sidebar_target_tell_line - 1])
+new_lines.append(lines[sidebar_target_tell_line - 1])
+new_lines.append(t + 'if sidebarTarget is not false then\n')
+for idx in range(sidebar_target_tell_line, end_try_line + 1):
+    new_lines.append('\t' + lines[idx])
+new_lines.append(t + 'else\n')
+new_lines.append(t + '\t-- macOS 26: Device Management moved under General, use search to navigate\n')
+new_lines.append(t + '\tdo shell script "open /System/Library/PreferencePanes/Profiles.prefPane"\n')
+new_lines.append(t + '\tdelay 3\n')
+new_lines.append(t + '\ttell application settingsApp to activate\n')
+new_lines.append(t + '\tdelay 1\n')
+new_lines.append(t + '\ttell application "System Events" to tell process settingsApp\n')
+new_lines.append(t + '\t\tkeystroke "f" using {command down}\n')
+new_lines.append(t + '\t\tdelay 0.5\n')
+new_lines.append(t + '\t\tkeystroke "Device Management"\n')
+new_lines.append(t + '\t\tdelay 1\n')
+new_lines.append(t + '\t\tkey code 125\n')
+new_lines.append(t + '\t\tdelay 1\n')
+new_lines.append(t + '\tend tell\n')
+new_lines.append(t + 'end if\n')
+new_lines.extend(lines[end_try_line + 1:])
+
+with open('/tmp/enroll-patched.applescript', 'w') as f:
+    f.writelines(new_lines)
+print(f"Patch applied: {len(lines)} -> {len(new_lines)} lines")
+PYEOF
+
+/usr/bin/osacompile -o /tmp/enroll-patched.scpt /tmp/enroll-patched.applescript && \
+  /usr/bin/sudo /bin/cp /tmp/enroll-patched.scpt "$ENROLL_SCRIPT" && \
+  /usr/bin/sudo /usr/sbin/chown root:wheel "$ENROLL_SCRIPT" && \
+  /usr/bin/sudo /bin/chmod 644 "$ENROLL_SCRIPT" && \
+  echo "Patch applied and script recompiled." || \
+  echo "WARN: Patch compile/install failed — using original script"
+
 echo ""
 echo "=== Phase 3 complete ==="
 echo ""
