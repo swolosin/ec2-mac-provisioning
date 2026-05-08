@@ -197,7 +197,7 @@ echo "Waiting 5 seconds for filesystem to settle..."
 echo "Patching enroll-ec2-mac.scpt for macOS 26 Device Management navigation..."
 /usr/bin/osadecompile "$ENROLL_SCRIPT" > /tmp/enroll-source.applescript
 
-python3 << 'PYEOF'
+/usr/bin/python3 << 'PYEOF'
 with open('/tmp/enroll-source.applescript', 'r') as f:
     lines = f.readlines()
 
@@ -231,8 +231,17 @@ new_lines.append(t + '\t\tdelay 0.5\n')
 new_lines.append(t + '\t\tkeystroke "Device Management"\n')
 new_lines.append(t + '\t\tdelay 1\n')
 new_lines.append(t + '\t\tkey code 125\n')
-new_lines.append(t + '\t\tdelay 1\n')
+new_lines.append(t + '\t\tdelay 2\n')
 new_lines.append(t + '\tend tell\n')
+new_lines.append(t + '\t-- Open profile and dismiss the Profile Downloaded dialog (Return = blue OK button)\n')
+new_lines.append(t + '\ttry\n')
+new_lines.append(t + '\t\tdo shell script "open /tmp/enrollmentProfile.mobileconfig"\n')
+new_lines.append(t + '\t\tdelay 3\n')
+new_lines.append(t + '\t\ttell application "System Events" to tell process settingsApp\n')
+new_lines.append(t + '\t\t\tkey code 36\n')
+new_lines.append(t + '\t\tend tell\n')
+new_lines.append(t + '\t\tdelay 2\n')
+new_lines.append(t + '\tend try\n')
 new_lines.append(t + 'end if\n')
 new_lines.extend(lines[end_try_line + 1:])
 
