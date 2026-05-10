@@ -268,12 +268,14 @@ echo ""
 echo "=== Phase 4: Configure MMSecret ==="
 
 /usr/bin/defaults write com.amazon.dsx.ec2.enrollment.automation MMSecret "mdmSecret"
+/usr/bin/defaults write com.amazon.dsx.ec2.enrollment.automation prodFlag "1"
 
 echo "Waiting 5 seconds for defaults to commit..."
 /bin/sleep 5
 MMSECRET_CHECK=$(/usr/bin/defaults read com.amazon.dsx.ec2.enrollment.automation MMSecret 2>/dev/null)
 [[ "$MMSECRET_CHECK" == "mdmSecret" ]] || { echo "ERROR: MMSecret did not persist after write" >&2; exit 1; }
 echo "MMSecret set: $MMSECRET_CHECK"
+echo "prodFlag set: $(/usr/bin/defaults read com.amazon.dsx.ec2.enrollment.automation prodFlag 2>/dev/null)"
 
 echo ""
 echo "=== Phase 4 complete ==="
@@ -309,6 +311,14 @@ echo "Waiting 5 seconds for LaunchAgent plist to be written..."
 /bin/sleep 5
 
 [[ -f "$LAUNCHAGENT_PLIST" ]] || { echo "ERROR: LaunchAgent plist not written" >&2; exit 1; }
+
+echo "Adding 90 second startup delay to LaunchAgent..."
+/usr/bin/sudo /usr/libexec/PlistBuddy -c "Delete :ProgramArguments" "$LAUNCHAGENT_PLIST"
+/usr/bin/sudo /usr/libexec/PlistBuddy -c "Add :ProgramArguments array" "$LAUNCHAGENT_PLIST"
+/usr/bin/sudo /usr/libexec/PlistBuddy -c "Add :ProgramArguments:0 string /bin/bash" "$LAUNCHAGENT_PLIST"
+/usr/bin/sudo /usr/libexec/PlistBuddy -c "Add :ProgramArguments:1 string -c" "$LAUNCHAGENT_PLIST"
+/usr/bin/sudo /usr/libexec/PlistBuddy -c "Add :ProgramArguments:2 string /bin/sleep 90 && /usr/bin/osascript /Users/Shared/enroll-ec2-mac.scpt" "$LAUNCHAGENT_PLIST"
+echo "LaunchAgent will fire 90 seconds after login, then clean up after enrollment."
 
 echo ""
 echo "=== Phase 6 complete ==="
