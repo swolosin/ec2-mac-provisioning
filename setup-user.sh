@@ -34,7 +34,7 @@ s = json.load(sys.stdin)
 print(f'USER={shlex.quote(s[\"localAdmin\"])}')
 print(f'PW={shlex.quote(s[\"localAdminPassword\"])}')
 ")"
-  [[ -n "$USER" && -n "$PW" ]] || { echo "ERROR: could not parse credentials from Secrets Manager" >&2; exit 1; }
+[[ -n "$USER" && -n "$PW" ]] || { echo "ERROR: could not parse credentials from Secrets Manager" >&2; exit 1; }
 
 # =====================================================
 # Phase 1: Set password and enable Secure Token
