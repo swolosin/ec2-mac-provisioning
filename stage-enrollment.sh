@@ -245,6 +245,23 @@ new_lines.append(t + '\tend try\n')
 new_lines.append(t + 'end if\n')
 new_lines.extend(lines[end_try_line + 1:])
 
+# Add `delay 90` at the start of the enrollment else block (the no-flags boot path).
+# Lets credentials retrieve immediately at T=0 (fresh launchd session context),
+# then waits 90s before GUI interaction so the system can fully settle.
+delay_inserted = False
+for i, l in enumerate(new_lines):
+    if 'set enrollmentCheckCLI to (do shell script' in l:
+        for j in range(i - 1, -1, -1):
+            if new_lines[j].strip() == 'try':
+                indent = new_lines[j][:len(new_lines[j]) - len(new_lines[j].lstrip())]
+                new_lines.insert(j, indent + 'delay 90\n')
+                print("Added delay 90 at start of enrollment else block")
+                delay_inserted = True
+                break
+        break
+if not delay_inserted:
+    print("WARN: enrollment else block marker not found — delay 90 not added")
+
 with open('/tmp/enroll-patched.applescript', 'w') as f:
     f.writelines(new_lines)
 print(f"Patch applied: {len(lines)} -> {len(new_lines)} lines")
@@ -311,14 +328,7 @@ echo "Waiting 5 seconds for LaunchAgent plist to be written..."
 /bin/sleep 5
 
 [[ -f "$LAUNCHAGENT_PLIST" ]] || { echo "ERROR: LaunchAgent plist not written" >&2; exit 1; }
-
-echo "Adding 90 second startup delay to LaunchAgent..."
-/usr/bin/sudo /usr/libexec/PlistBuddy -c "Delete :ProgramArguments" "$LAUNCHAGENT_PLIST"
-/usr/bin/sudo /usr/libexec/PlistBuddy -c "Add :ProgramArguments array" "$LAUNCHAGENT_PLIST"
-/usr/bin/sudo /usr/libexec/PlistBuddy -c "Add :ProgramArguments:0 string /bin/bash" "$LAUNCHAGENT_PLIST"
-/usr/bin/sudo /usr/libexec/PlistBuddy -c "Add :ProgramArguments:1 string -c" "$LAUNCHAGENT_PLIST"
-/usr/bin/sudo /usr/libexec/PlistBuddy -c "Add :ProgramArguments:2 string /bin/sleep 90 && /usr/bin/osascript /Users/Shared/enroll-ec2-mac.scpt" "$LAUNCHAGENT_PLIST"
-echo "LaunchAgent will fire 90 seconds after login, then clean up after enrollment."
+echo "LaunchAgent installed (runs osascript directly; 90s startup delay is inside the script)."
 
 echo ""
 echo "=== Phase 6 complete ==="
