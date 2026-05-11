@@ -241,12 +241,12 @@ echo ""
 
 echo "=== Phase 6: Install LaunchAgent ==="
 
-/usr/bin/env PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" /usr/bin/osascript "$ENROLL_SCRIPT" --launchagent --no-first-run
+/usr/bin/osascript "$ENROLL_SCRIPT" --launchagent --no-first-run
 echo "Waiting 5 seconds for LaunchAgent plist to be written..."
 /bin/sleep 5
 
 [[ -f "$LAUNCHAGENT_PLIST" ]] || { echo "ERROR: LaunchAgent plist not written" >&2; exit 1; }
-echo "LaunchAgent installed (runs osascript directly; 90s startup delay is inside the script)."
+echo "LaunchAgent installed."
 
 echo ""
 echo "=== Phase 6 complete ==="
