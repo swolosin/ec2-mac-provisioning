@@ -117,6 +117,40 @@ defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/nu
 echo "  /etc/kcpassword: $(test -f /etc/kcpassword && echo present || echo MISSING)"
 echo "  Secure token: $(sysadminctl -secureTokenStatus "$USER" 2>&1)"
 
+# =====================================================
+# Phase 3: Disable screen saver and create Jamf locationd dir
+# =====================================================
+# These would normally be set by enroll-ec2-mac.scpt's --firstrun block,
+# but we use --no-first-run for headless setup. Without these:
+#   - Screen saver would lock the screen at boot, blocking the LaunchAgent's
+#     GUI interactions (the actual cause of headless enrollment failures)
+#   - Jamf binary would not have its required locationd directory
+#
+# Note: this script runs as root via User Data, so we use `sudo -u "$USER"`
+# to write the screensaver prefs into ec2-user's ByHost folder (not root's).
+
+echo ""
+echo "=== Phase 3: Disable screen saver and create Jamf locationd dir ==="
+
+echo "Disabling screen saver idle timeout..."
+sudo -u "$USER" /usr/bin/defaults -currentHost write com.apple.screensaver idleTime 0
+
+echo "Disabling password requirement after screen saver..."
+sudo -u "$USER" /usr/bin/defaults -currentHost write com.apple.screensaver askForPassword 0
+
+echo "Creating /private/var/db/locationd..."
+/bin/mkdir -p /private/var/db/locationd
+/usr/sbin/chown _locationd:_locationd /private/var/db/locationd || true
+
+echo ""
+echo "Verifying:"
+echo "  screensaver idleTime:        $(sudo -u "$USER" /usr/bin/defaults -currentHost read com.apple.screensaver idleTime 2>/dev/null || echo 'not set')"
+echo "  screensaver askForPassword:  $(sudo -u "$USER" /usr/bin/defaults -currentHost read com.apple.screensaver askForPassword 2>/dev/null || echo 'not set')"
+echo "  locationd dir:               $(ls -ld /private/var/db/locationd 2>/dev/null || echo 'MISSING')"
+
+echo ""
+echo "=== Phase 3 complete ==="
+
 echo ""
 echo "$(date): setup-user completed"
 echo "Next: Disable SIP from CloudShell, then SSH in for TCC setup."

@@ -47,7 +47,7 @@ chmod +x /tmp/setup-user.sh
 /tmp/setup-user.sh
 ```
 
-Sets ec2-user's password (from `mdmSecret.localAdminPassword`), enables Secure Token, configures auto-login.
+Sets ec2-user's password (from `mdmSecret.localAdminPassword`), enables Secure Token, configures auto-login, disables the screen saver (prevents the screen from locking at boot before the LaunchAgent can drive enrollment), and creates `/private/var/db/locationd` (required by the Jamf binary).
 
 ### Step 3 — Disable SIP from CloudShell
 
@@ -129,6 +129,7 @@ echo && echo "=== MMErrors.log ===" && cat /tmp/MMErrors.log 2>/dev/null || echo
 | `MDM enrollment: No`, `NoCredentials` in MMErrors.log | IAM instance profile not attached | Attach in EC2 console: Actions → Security → Modify IAM role |
 | `AccessDeniedException` on `secretsmanager:GetSecretValue` | IAM policy missing or wrong secret ARN | Update IAM policy with correct `mdmSecret` ARN |
 | `MDM enrollment: No`, LaunchAgent still present | Enrollment failed mid-flow | Check MMErrors.log for the specific error |
+| `sidebarTarget is not defined (-2753)` in MMErrors.log | Screen locked at boot before LaunchAgent could drive the GUI | Confirm setup-user.sh Phase 3 ran on staging: `defaults -currentHost read com.apple.screensaver idleTime` must return `0`. Re-stage if missing. |
 | Script appears stuck (osascript running 5+ minutes, no progress) | GUI navigation hung | Use visual debugging below |
 
 ### Force-retrigger enrollment
