@@ -7,7 +7,7 @@
 --   - macOS 26 Device Management navigation (no sidebarTarget crash)
 --   - No external dependencies (no cliclick)
 --   - Hardcoded fallback is "mdmSecret" not "jamfSecret"
---   - Structured error logging throughout
+--   - Timestamped logging to /Library/Logs/JPMC/
 --
 -- Configuration:
 --   defaults write com.jpmc.ec2.mdm.enrollment MMSecret "your-secret-id"
@@ -18,6 +18,17 @@
 --
 -- Invoked at boot by LaunchAgent (no argv):
 --   osascript /Users/Shared/JPMC-EC2-Enroll.scpt
+
+-- ============================================================
+-- LOGGING
+-- All log entries are timestamped. LaunchAgent captures stderr
+-- (where AppleScript's `log` writes) to /Library/Logs/JPMC/EC2-Enroll.log.
+-- ============================================================
+
+on logMsg(msg)
+	set ts to (do shell script "date '+%Y-%m-%d %H:%M:%S'")
+	log ts & "  " & msg
+end logMsg
 
 -- ============================================================
 -- CONFIGURATION
@@ -52,11 +63,15 @@ on imdsGet(mdPath)
 		try
 			set token to (do shell script "PATH=" & awsPath & " ; curl -sf --connect-timeout 5 --max-time 10 -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300'")
 			if length of token > 10 then
-				return (do shell script "PATH=" & awsPath & " ; curl -sf --connect-timeout 5 --max-time 10 -H 'X-aws-ec2-metadata-token: " & token & "' 'http://169.254.169.254/latest/meta-data/" & mdPath & "'")
+				set mdResult to (do shell script "PATH=" & awsPath & " ; curl -sf --connect-timeout 5 --max-time 10 -H 'X-aws-ec2-metadata-token: " & token & "' 'http://169.254.169.254/latest/meta-data/" & mdPath & "'")
+				my logMsg("IMDS ok (attempt " & attempt & "/" & maxAttempts & "): " & mdPath & " = " & mdResult)
+				return mdResult
 			end if
+		on error errMsg
+			my logMsg("IMDS attempt " & attempt & "/" & maxAttempts & " failed: " & errMsg)
 		end try
 		if attempt < maxAttempts then
-			log "IMDS not ready (attempt " & attempt & "/" & maxAttempts & "), retrying in " & retryDelay & "s..."
+			my logMsg("IMDS not ready (attempt " & attempt & "/" & maxAttempts & "), retrying in " & retryDelay & "s...")
 			delay retryDelay
 		end if
 	end repeat
@@ -69,13 +84,17 @@ end imdsGet
 
 on getSecret(secretRegion, secretID, keyName)
 	set awsPath to "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin"
+	my logMsg("Fetching secret key: " & keyName & " from " & secretID & " in " & secretRegion)
 	try
 		set secretJSON to (do shell script "PATH=" & awsPath & " ; aws secretsmanager get-secret-value --region " & quoted form of secretRegion & " --secret-id " & quoted form of secretID & " --query SecretString --output text 2>&1")
 		if secretJSON contains "Error" or secretJSON contains "error" then
 			error "Secrets Manager returned error: " & secretJSON
 		end if
-		return (do shell script "echo " & quoted form of secretJSON & " | /usr/bin/python3 -c \"import sys,json; d=json.load(sys.stdin); print(d['" & keyName & "'])\"")
+		set val to (do shell script "echo " & quoted form of secretJSON & " | /usr/bin/python3 -c \"import sys,json; d=json.load(sys.stdin); print(d['" & keyName & "'])\"")
+		my logMsg("Secret key retrieved: " & keyName)
+		return val
 	on error errMsg
+		my logMsg("ERROR getSecret(" & keyName & "): " & errMsg)
 		error "getSecret(" & keyName & "): " & errMsg
 	end try
 end getSecret
@@ -95,8 +114,11 @@ on getJamfToken(jamfURL, apiUser, apiPass)
 			set AppleScript's text item delimiters to "\""
 			set tok to text item 1 of tok
 			set AppleScript's text item delimiters to ""
+			my logMsg("Jamf auth: OAuth client credentials succeeded")
 			return tok
 		end if
+	on error errMsg
+		my logMsg("Jamf OAuth attempt failed: " & errMsg & " — trying Basic auth")
 	end try
 	-- Fall back to Basic auth
 	try
@@ -107,8 +129,10 @@ on getJamfToken(jamfURL, apiUser, apiPass)
 		set AppleScript's text item delimiters to "\""
 		set tok to text item 1 of tok
 		set AppleScript's text item delimiters to ""
+		my logMsg("Jamf auth: Basic auth succeeded")
 		return tok
 	on error errMsg
+		my logMsg("ERROR: Jamf authentication failed: " & errMsg)
 		error "Jamf authentication failed: " & errMsg
 	end try
 end getJamfToken
@@ -125,8 +149,10 @@ on createJamfInvitation(jamfURL, authToken, mgmtUser, mgmtPass)
 		set invID to text item 1 of invID
 		set AppleScript's text item delimiters to ""
 		if length of invID < 1 then error "Empty invitation ID — response: " & response
+		my logMsg("Enrollment invitation created: " & invID)
 		return invID
 	on error errMsg
+		my logMsg("ERROR createJamfInvitation: " & errMsg)
 		error "createJamfInvitation: " & errMsg
 	end try
 end createJamfInvitation
@@ -144,18 +170,21 @@ end buildEnrollmentProfile
 -- ============================================================
 
 on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
-	-- Open profile — shows "Profile Downloaded" notification on Tahoe
+	my logMsg("Tahoe: opening enrollment profile...")
 	do shell script "open /tmp/enrollmentProfile.mobileconfig"
 	delay 2
 
 	-- Dismiss the notification (Return = blue OK button) and navigate to Device Management
+	my logMsg("Tahoe: dismissing profile notification...")
 	tell application "System Events" to key code 36
 	delay 2
 
+	my logMsg("Tahoe: activating System Settings...")
 	tell application settingsApp to activate
 	delay 1
 
 	-- Wait for the profile cell in Tahoe's UI structure (group 3)
+	my logMsg("Tahoe: waiting for profile cell...")
 	set profileFound to false
 	repeat 30 times
 		try
@@ -174,7 +203,11 @@ on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
 		delay 0.5
 	end repeat
 
-	if not profileFound then error "Tahoe: profile cell not found after 15 seconds"
+	if not profileFound then
+		my logMsg("ERROR: Tahoe: profile cell not found after 15 seconds")
+		error "Tahoe: profile cell not found after 15 seconds"
+	end if
+	my logMsg("Tahoe: profile cell found — clicking to open detail view...")
 
 	-- Click the profile cell to select it (two clicks = open detail view)
 	tell application "System Events" to tell process settingsApp
@@ -194,6 +227,7 @@ end installProfile_Tahoe
 -- ============================================================
 
 on installProfile_Ventura(adminPass, localAdmin, settingsApp, macMajor)
+	my logMsg("Sonoma/Sequoia (macOS " & macMajor & "): opening enrollment profile...")
 	-- Open profile, quit Settings, reopen to Profiles pane cleanly
 	do shell script "open /tmp/enrollmentProfile.mobileconfig"
 	delay 1
@@ -204,11 +238,13 @@ on installProfile_Ventura(adminPass, localAdmin, settingsApp, macMajor)
 	try
 		do shell script "killall -m BluetoothSetupAssistant 2>/dev/null; true"
 	end try
+	my logMsg("Sonoma/Sequoia: opening Profiles prefPane...")
 	do shell script "open /System/Library/PreferencePanes/Profiles.prefPane"
 	delay 2
 
 	-- macOS 14: navigate sidebar to "Profile" entry
 	if macMajor is 14 then
+		my logMsg("Sonoma: navigating sidebar for Profile entry...")
 		tell application "System Events" to tell process settingsApp
 			repeat with sidebarIdx from 2 to 8
 				try
@@ -223,6 +259,7 @@ on installProfile_Ventura(adminPass, localAdmin, settingsApp, macMajor)
 	end if
 
 	-- Wait for profile cell to appear
+	my logMsg("Sonoma/Sequoia: waiting for profile cell...")
 	set profileCell to missing value
 	repeat 30 times
 		try
@@ -251,7 +288,11 @@ on installProfile_Ventura(adminPass, localAdmin, settingsApp, macMajor)
 		delay 0.5
 	end repeat
 
-	if profileCell is missing value then error "Sonoma/Sequoia: profile cell not found"
+	if profileCell is missing value then
+		my logMsg("ERROR: Sonoma/Sequoia: profile cell not found after 15 seconds")
+		error "Sonoma/Sequoia: profile cell not found"
+	end if
+	my logMsg("Sonoma/Sequoia: profile cell found — clicking to open detail view...")
 
 	-- Click the profile cell
 	tell application "System Events" to tell process settingsApp
@@ -293,17 +334,23 @@ on clickInstallButton(settingsApp)
 			end try
 			delay 0.5
 		end repeat
-		if not clicked then error "Install button not found after 10 seconds"
+		if not clicked then
+			my logMsg("ERROR: Install button not found after 10 seconds")
+			error "Install button not found after 10 seconds"
+		end if
+		my logMsg("Install button clicked")
 		delay 0.5
 
 		-- Confirmation Install / Enroll button
 		repeat 20 times
 			try
 				click button "Install" of sheet 1 of window 1
+				my logMsg("Confirmation Install button clicked")
 				exit repeat
 			end try
 			try
 				click button "Enroll" of sheet 1 of window 1
+				my logMsg("Enroll button clicked")
 				exit repeat
 			end try
 			delay 0.3
@@ -319,6 +366,7 @@ end clickInstallButton
 
 on enterAdminPassword(adminPass)
 	-- Wait for SecurityAgent to present the password dialog
+	my logMsg("Waiting for SecurityAgent password dialog...")
 	set dialogReady to false
 	repeat 30 times
 		try
@@ -332,10 +380,11 @@ on enterAdminPassword(adminPass)
 	end repeat
 
 	if not dialogReady then
-		log "WARNING: SecurityAgent password dialog did not appear — profile may have installed without authentication"
+		my logMsg("WARNING: SecurityAgent password dialog did not appear — profile may have installed without authentication")
 		return
 	end if
 
+	my logMsg("SecurityAgent dialog ready — pasting password...")
 	-- Paste password and submit
 	set the clipboard to adminPass
 	delay 0.3
@@ -348,6 +397,7 @@ on enterAdminPassword(adminPass)
 	-- Clear clipboard immediately
 	set the clipboard to ""
 	set the clipboard to ""
+	my logMsg("Password submitted to SecurityAgent")
 end enterAdminPassword
 
 -- ============================================================
@@ -356,12 +406,14 @@ end enterAdminPassword
 -- ============================================================
 
 on waitForEnrollment(localAdmin, adminPass, settingsApp)
-	log "Waiting for MDM enrollment to complete..."
+	my logMsg("Waiting for MDM enrollment to complete (up to 5 minutes)...")
+	set pollCount to 0
 	repeat 60 times
+		set pollCount to pollCount + 1
 		-- CLI check (most reliable)
 		try
 			if (do shell script "/usr/bin/profiles status -type enrollment | /usr/bin/grep 'enrollment: Yes'") contains "Yes" then
-				log "MDM enrollment confirmed."
+				my logMsg("MDM enrollment confirmed via CLI (poll " & pollCount & ")")
 				try
 					do shell script "killall -m 'System Settings'" user name localAdmin password adminPass with administrator privileges
 				end try
@@ -373,7 +425,7 @@ on waitForEnrollment(localAdmin, adminPass, settingsApp)
 			tell application "System Events" to tell process settingsApp
 				set winText to value of static text 1 of group 1 of scroll area 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
 				if winText contains "managed" then
-					log "MDM enrollment confirmed (UI)."
+					my logMsg("MDM enrollment confirmed via UI (poll " & pollCount & ")")
 					try
 						do shell script "killall -m 'System Settings'" user name localAdmin password adminPass with administrator privileges
 					end try
@@ -381,9 +433,12 @@ on waitForEnrollment(localAdmin, adminPass, settingsApp)
 				end if
 			end tell
 		end try
+		if pollCount mod 6 is 0 then
+			my logMsg("Still waiting for enrollment... (poll " & pollCount & "/60, " & (pollCount * 5) & "s elapsed)")
+		end if
 		delay 5
 	end repeat
-	log "WARNING: enrollment not confirmed within 5 minutes"
+	my logMsg("WARNING: enrollment not confirmed within 5 minutes — check /Library/Logs/JPMC/EC2-Enroll.log and Jamf Pro")
 	return false
 end waitForEnrollment
 
@@ -392,38 +447,45 @@ end waitForEnrollment
 -- ============================================================
 
 on runCleanup(localAdmin, adminPass)
-	log "Running prodFlag cleanup..."
+	my logMsg("Running prodFlag cleanup...")
 	set awsPath to "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin"
 
 	try
 		do shell script "tccutil reset Accessibility" user name localAdmin password adminPass with administrator privileges
+		my logMsg("Cleanup: TCC Accessibility reset")
 	end try
 	try
 		do shell script "tccutil reset AppleEvents" user name localAdmin password adminPass with administrator privileges
+		my logMsg("Cleanup: TCC AppleEvents reset")
 	end try
 	try
 		do shell script "sysadminctl -autologin off" user name localAdmin password adminPass with administrator privileges
+		my logMsg("Cleanup: auto-login disabled")
 	end try
 	try
 		do shell script "defaults delete com.jpmc.ec2.mdm.enrollment"
+		my logMsg("Cleanup: enrollment defaults deleted")
 	end try
 	try
 		do shell script "rm -f /tmp/enrollmentProfile.mobileconfig" user name localAdmin password adminPass with administrator privileges
+		my logMsg("Cleanup: enrollment profile removed")
 	end try
 	try
 		do shell script "PATH=" & awsPath & " ; export HOMEBREW_NO_AUTO_UPDATE=1 ; brew uninstall cliclick 2>/dev/null; true"
 	end try
 	try
 		do shell script "launchctl unload -w /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist" user name localAdmin password adminPass with administrator privileges
+		my logMsg("Cleanup: LaunchAgent unloaded and removed")
 	end try
 
-	log "Cleanup complete."
+	my logMsg("Cleanup complete.")
 end runCleanup
 
 -- ============================================================
 -- LAUNCHAGENT INSTALLER
 -- Called by stage-enrollment.sh via --launchagent --no-first-run.
 -- Writes the plist directly without the firstrun dialog flow.
+-- Log directory /Library/Logs/JPMC/ is created by stage-enrollment.sh.
 -- ============================================================
 
 on installLaunchAgent(localAdmin, adminPass)
@@ -444,9 +506,9 @@ on installLaunchAgent(localAdmin, adminPass)
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/tmp/MMErrors.log</string>
+	<string>/Library/Logs/JPMC/EC2-Enroll.log</string>
 	<key>StandardOutPath</key>
-	<string>/tmp/MMOutput.log</string>
+	<string>/Library/Logs/JPMC/EC2-Enroll-out.log</string>
 </dict>
 </plist>"
 
@@ -456,7 +518,7 @@ on installLaunchAgent(localAdmin, adminPass)
 	do shell script "echo " & quoted form of plistXML & " > /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist" user name localAdmin password adminPass with administrator privileges
 	do shell script "chown root:wheel /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist" user name localAdmin password adminPass with administrator privileges
 
-	log return & "JPMC-EC2-Enroll LaunchAgent installed."
+	my logMsg("JPMC-EC2-Enroll LaunchAgent installed.")
 end installLaunchAgent
 
 -- ============================================================
@@ -471,24 +533,28 @@ on run argv
 	set settingsApp to "System Settings"
 	if macMajor < 13 then set settingsApp to "System Preferences"
 
-	log "JPMC-EC2-Enroll | macOS " & macMajor
+	my logMsg("=== JPMC-EC2-Enroll started | macOS " & macMajor & " ===")
 
 	-- LaunchAgent installation mode (stage-enrollment.sh passes --launchagent --no-first-run)
 	if argv contains "--launchagent" then
+		my logMsg("Mode: LaunchAgent install")
 		set secretID to my getMMSecret()
+		my logMsg("Secret ID: " & secretID)
 		set region to my imdsGet("placement/region")
 		set localAdmin to my getSecret(region, secretID, "localAdmin")
 		set adminPass to my getSecret(region, secretID, "localAdminPassword")
 		my installLaunchAgent(localAdmin, adminPass)
+		my logMsg("=== LaunchAgent install complete ===")
 		return
 	end if
 
 	-- Enrollment mode (LaunchAgent fires at boot with no argv)
+	my logMsg("Mode: enrollment")
 
 	-- Short-circuit if already enrolled
 	try
 		if (do shell script "/usr/bin/profiles status -type enrollment | /usr/bin/grep 'MDM enrollment: Yes'") contains "Yes" then
-			log "Already enrolled — nothing to do."
+			my logMsg("Already enrolled — nothing to do.")
 			return
 		end if
 	end try
@@ -496,19 +562,21 @@ on run argv
 	-- Read configuration
 	set secretID to my getMMSecret()
 	set doProdCleanup to my getProdFlag()
+	my logMsg("Secret ID: " & secretID & " | prodFlag: " & doProdCleanup)
 
 	-- Get region with retry (key fix for boot-time IMDS failure)
-	log "Getting instance region..."
+	my logMsg("Getting instance region...")
 	set instanceRegion to my imdsGet("placement/region")
-	log "Region: " & instanceRegion
+	my logMsg("Region: " & instanceRegion)
 
 	-- Retrieve credentials from Secrets Manager
-	log "Retrieving credentials..."
+	my logMsg("Retrieving credentials from Secrets Manager...")
 	set mdmDomain to my getSecret(instanceRegion, secretID, "mdmServerDomain")
 	set mdmUser to my getSecret(instanceRegion, secretID, "mdmEnrollmentUser")
 	set mdmPass to my getSecret(instanceRegion, secretID, "mdmEnrollmentPassword")
 	set localAdmin to my getSecret(instanceRegion, secretID, "localAdmin")
 	set adminPass to my getSecret(instanceRegion, secretID, "localAdminPassword")
+	my logMsg("All credentials retrieved.")
 
 	-- Normalize Jamf URL
 	if mdmDomain starts with "https://" then
@@ -517,44 +585,46 @@ on run argv
 		set jamfURL to "https://" & mdmDomain
 	end if
 	if not (jamfURL ends with "/") then set jamfURL to jamfURL & "/"
-	log "Jamf: " & jamfURL
+	my logMsg("Jamf URL: " & jamfURL)
 
 	-- Set Jamf VM flag so EC2 Mac is not treated as a VM in Jamf records
 	try
 		do shell script "defaults write /Library/Preferences/com.jamfsoftware.jamf is_virtual_machine 0" user name localAdmin password adminPass with administrator privileges
 		do shell script "defaults write com.jamfsoftware.jamf is_virtual_machine 0"
+		my logMsg("Jamf VM flag cleared (is_virtual_machine=0)")
 	end try
 
 	-- Authenticate with Jamf Pro
-	log "Authenticating with Jamf..."
+	my logMsg("Authenticating with Jamf Pro...")
 	set jamfToken to my getJamfToken(jamfURL, mdmUser, mdmPass)
 
 	-- Generate enrollment invitation
-	log "Creating enrollment invitation..."
+	my logMsg("Creating enrollment invitation...")
 	set mgmtUser to "_enroll-ec2"
 	set mgmtPass to (do shell script "uuidgen")
 	set invitationID to my createJamfInvitation(jamfURL, jamfToken, mgmtUser, mgmtPass)
-	log "Invitation: " & invitationID
 
 	-- Write enrollment profile to disk
+	my logMsg("Writing enrollment profile to /tmp/enrollmentProfile.mobileconfig...")
 	do shell script "echo " & quoted form of (my buildEnrollmentProfile(invitationID, jamfURL)) & " > /tmp/enrollmentProfile.mobileconfig"
-	log "Profile written to /tmp/enrollmentProfile.mobileconfig"
+	my logMsg("Enrollment profile written.")
 
 	-- Install profile (macOS version-specific UI flow)
-	log "Installing profile (macOS " & macMajor & ")..."
+	my logMsg("Installing profile via UI (macOS " & macMajor & ")...")
 	if macMajor >= 26 then
 		my installProfile_Tahoe(adminPass, localAdmin, settingsApp)
 	else
 		my installProfile_Ventura(adminPass, localAdmin, settingsApp, macMajor)
 	end if
+	my logMsg("Profile install UI flow complete.")
 
 	-- Wait for MDM enrollment to complete
 	set enrolled to my waitForEnrollment(localAdmin, adminPass, settingsApp)
 
 	if enrolled then
-		log "JPMC-EC2-Enroll: SUCCESS"
+		my logMsg("=== JPMC-EC2-Enroll: SUCCESS ===")
 		if doProdCleanup then my runCleanup(localAdmin, adminPass)
 	else
-		log "JPMC-EC2-Enroll: enrollment did not complete — check /tmp/MMErrors.log and Jamf Pro"
+		my logMsg("=== JPMC-EC2-Enroll: FAILED — enrollment did not complete. Check /Library/Logs/JPMC/EC2-Enroll.log and Jamf Pro ===")
 	end if
 end run
