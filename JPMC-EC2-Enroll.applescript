@@ -20,6 +20,16 @@
 --   osascript /Users/Shared/JPMC-EC2-Enroll.scpt
 
 -- ============================================================
+-- ENVIRONMENT CONFIGURATION
+-- Change SECRET_ID to match the AWS Secrets Manager secret name
+-- for the target environment (dev, staging, production).
+-- The secret must contain: mdmServerDomain, mdmEnrollmentUser,
+-- mdmEnrollmentPassword, localAdmin, localAdminPassword.
+-- ============================================================
+
+property SECRET_ID : "mdmSecret"
+
+-- ============================================================
 -- LOGGING
 -- All log entries are timestamped. LaunchAgent captures stderr
 -- (where AppleScript's `log` writes) to /Library/Logs/JPMC/EC2-Enroll.log.
@@ -38,7 +48,7 @@ on getMMSecret()
 	try
 		return (do shell script "defaults read com.jpmc.ec2.mdm.enrollment MMSecret")
 	on error
-		return "mdmSecret"
+		return SECRET_ID
 	end try
 end getMMSecret
 

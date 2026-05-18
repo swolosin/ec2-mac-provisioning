@@ -24,6 +24,13 @@ export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 set -euo pipefail
 
+# =====================================================
+# ENVIRONMENT CONFIGURATION
+# Change SECRET_ID to match the AWS Secrets Manager secret name
+# for the target environment (dev, staging, production).
+# =====================================================
+readonly SECRET_ID="mdmSecret"
+
 readonly ENROLL_SCRIPT="/Users/Shared/JPMC-EC2-Enroll.scpt"
 readonly ENROLL_SOURCE_URL="https://raw.githubusercontent.com/swolosin/ec2-mac-provisioning/main/JPMC-EC2-Enroll.applescript"
 readonly LAUNCHAGENT_PLIST="/Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist"
@@ -177,12 +184,12 @@ echo ""
 
 echo "=== Phase 4: Configure MMSecret ==="
 
-/usr/bin/defaults write com.jpmc.ec2.mdm.enrollment MMSecret "mdmSecret"
+/usr/bin/defaults write com.jpmc.ec2.mdm.enrollment MMSecret "$SECRET_ID"
 /usr/bin/defaults write com.jpmc.ec2.mdm.enrollment prodFlag "1"
 
 /bin/sleep 5
 MMSECRET_CHECK=$(/usr/bin/defaults read com.jpmc.ec2.mdm.enrollment MMSecret 2>/dev/null)
-[[ "$MMSECRET_CHECK" == "mdmSecret" ]] || { echo "ERROR: MMSecret did not persist" >&2; exit 1; }
+[[ "$MMSECRET_CHECK" == "$SECRET_ID" ]] || { echo "ERROR: MMSecret did not persist" >&2; exit 1; }
 echo "MMSecret set: $MMSECRET_CHECK"
 echo "prodFlag set: $(/usr/bin/defaults read com.jpmc.ec2.mdm.enrollment prodFlag 2>/dev/null)"
 
