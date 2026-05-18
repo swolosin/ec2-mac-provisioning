@@ -28,8 +28,13 @@ set -euo pipefail
 # ENVIRONMENT CONFIGURATION
 # Change SECRET_ID to match the AWS Secrets Manager secret name
 # for the target environment (dev, staging, production).
+#
+# PROD_FLAG controls post-enrollment cleanup (TCC reset, auto-login
+# off, LaunchAgent removal). Set to "1" only when everything is
+# working end-to-end. Leave "0" during testing.
 # =====================================================
 readonly SECRET_ID="mdmSecret"
+readonly PROD_FLAG="0"
 
 readonly ENROLL_SCRIPT="/Users/Shared/JPMC-EC2-Enroll.scpt"
 readonly ENROLL_SOURCE_URL="https://raw.githubusercontent.com/swolosin/ec2-mac-provisioning/main/JPMC-EC2-Enroll.applescript"
@@ -185,7 +190,7 @@ echo ""
 echo "=== Phase 4: Configure MMSecret ==="
 
 /usr/bin/defaults write com.jpmc.ec2.mdm.enrollment MMSecret "$SECRET_ID"
-/usr/bin/defaults write com.jpmc.ec2.mdm.enrollment prodFlag "1"
+/usr/bin/defaults write com.jpmc.ec2.mdm.enrollment prodFlag "$PROD_FLAG"
 
 /bin/sleep 5
 MMSECRET_CHECK=$(/usr/bin/defaults read com.jpmc.ec2.mdm.enrollment MMSecret 2>/dev/null)
