@@ -55,7 +55,7 @@ echo ""
 
 echo "Creating log directory /Library/Logs/JPMC/..."
 /usr/bin/sudo /bin/mkdir -p /Library/Logs/JPMC
-/usr/bin/sudo /bin/chmod 755 /Library/Logs/JPMC
+/usr/bin/sudo /bin/chmod 777 /Library/Logs/JPMC
 /usr/bin/sudo /usr/sbin/chown root:wheel /Library/Logs/JPMC
 echo "Log directory ready."
 echo ""
