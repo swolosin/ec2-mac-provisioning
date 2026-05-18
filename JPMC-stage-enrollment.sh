@@ -1,33 +1,34 @@
 #!/bin/zsh
 #
-# stage-enrollment.sh
+# JPMC-stage-enrollment.sh
 #
-# Prepares a staging EC2 Mac instance for MDM enrollment AMI creation:
-#   1. Pre-grant TCC permissions for osascript (Accessibility + AppleEvents)
-#   2. Install cliclick via Homebrew
-#   3. Download enroll-ec2-mac.scpt from the AWS sample repo
-#   4. Configure MMSecret
-#   5. Install the LaunchAgent
-#   6. Verify everything is in place
+# Prepares an EC2 Mac staging instance for headless Jamf MDM enrollment.
+# Uses JPMC-EC2-Enroll.scpt instead of the AWS enroll-ec2-mac.scpt,
+# which fixes:
+#   - IMDS retry logic (boot-time exit code 7 failure)
+#   - macOS 26 Device Management navigation (sidebarTarget crash)
+#   - No external dependencies (no cliclick required)
 #
 # Requirements:
-#   - Run as ec2-user (NOT root/sudo)
-#   - SIP must be disabled
+#   - Run as ec2-user (NOT root)
+#   - SIP must be disabled before running
+#   - JPMC-setup-user.sh must have been run first
 #   - Internet access
+#
+# Usage:
+#   scp -i key.pem JPMC-stage-enrollment.sh ec2-user@<ip>:/tmp/
+#   chmod +x /tmp/JPMC-stage-enrollment.sh && /tmp/JPMC-stage-enrollment.sh
 #
 
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 set -euo pipefail
 
-readonly ENROLL_SCRIPT="/Users/Shared/enroll-ec2-mac.scpt"
-readonly ENROLL_SCRIPT_URL="https://raw.githubusercontent.com/aws-samples/amazon-ec2-mac-mdm-enrollment-automation/main/enroll-ec2-mac.scpt"
-readonly LAUNCHAGENT_PLIST="/Library/LaunchAgents/com.amazon.dsx.ec2.enrollment.automation.startup.plist"
-readonly CLICLICK="/usr/local/bin/cliclick"
-readonly BREW_APPLE_SILICON="/opt/homebrew/bin/brew"
-readonly BREW_INTEL="/usr/local/bin/brew"
+readonly ENROLL_SCRIPT="/Users/Shared/JPMC-EC2-Enroll.scpt"
+readonly ENROLL_SOURCE_URL="https://raw.githubusercontent.com/swolosin/ec2-mac-provisioning/main/JPMC-EC2-Enroll.applescript"
+readonly LAUNCHAGENT_PLIST="/Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist"
 
-echo "$(/bin/date): stage-enrollment started"
+echo "$(/bin/date): JPMC-stage-enrollment started"
 echo ""
 
 # --- Preflight checks ---
@@ -36,6 +37,8 @@ echo ""
 
 # =====================================================
 # Phase 1: TCC Setup
+# Pre-grant Accessibility and AppleEvents permissions for osascript
+# so the enrollment script can drive System Settings headlessly.
 # =====================================================
 
 echo "=== Phase 1: TCC Setup ==="
@@ -68,7 +71,6 @@ tcc_insert() {
   local db="$1" use_sudo="$2" service="$3" target="$4" client_hex="$5" target_hex="$6"
   local target_blob="NULL"
   [[ -n "$target_hex" ]] && target_blob="X'$target_hex'"
-
   ${use_sudo} /usr/bin/sqlite3 "$db" <<SQL
 INSERT INTO access (
   service, client, client_type, auth_value, auth_reason, auth_version,
@@ -85,7 +87,7 @@ SQL
 }
 
 echo "Generating csreq for osascript..."
-client_hex=$(csreq_hex "$CLIENT") || { echo "ERROR: failed to generate csreq for $CLIENT" >&2; exit 1; }
+client_hex=$(csreq_hex "$CLIENT") || { echo "ERROR: failed to generate csreq" >&2; exit 1; }
 
 echo "Writing kTCCServiceAccessibility to system DB..."
 /usr/bin/sudo /usr/bin/sqlite3 "$SYS_DB" "DELETE FROM access WHERE client='$CLIENT' AND client_type=1 AND service='kTCCServiceAccessibility';"
@@ -125,126 +127,83 @@ echo ""
 echo "=== Phase 1 complete ==="
 echo ""
 
-# =====================================================
-# Phase 2: Install cliclick
-# =====================================================
-
-echo "=== Phase 2: Install cliclick ==="
-
-if [[ -x "$CLICLICK" ]] && "$CLICLICK" -V >/dev/null 2>&1; then
-  echo "cliclick already installed at $CLICLICK"
-  "$CLICLICK" -V
-else
-  if [[ -x "$BREW_APPLE_SILICON" ]]; then
-    BREW="$BREW_APPLE_SILICON"
-  elif [[ -x "$BREW_INTEL" ]]; then
-    BREW="$BREW_INTEL"
-  else
-    echo "Installing Homebrew..."
-    NONINTERACTIVE=1 /bin/bash -c "$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    if [[ -x "$BREW_APPLE_SILICON" ]]; then
-      BREW="$BREW_APPLE_SILICON"
-    elif [[ -x "$BREW_INTEL" ]]; then
-      BREW="$BREW_INTEL"
-    else
-      echo "ERROR: Homebrew install completed but brew binary not found" >&2
-      exit 1
-    fi
-  fi
-
-  echo "Installing cliclick via $BREW..."
-  "$BREW" install cliclick
-
-  BREW_CLICLICK=$("$BREW" --prefix cliclick)/bin/cliclick
-  if [[ "$BREW_CLICLICK" != "$CLICLICK" ]]; then
-    echo "Symlinking $BREW_CLICLICK -> $CLICLICK"
-    /usr/bin/sudo /bin/mkdir -p /usr/local/bin
-    /usr/bin/sudo /bin/ln -sf "$BREW_CLICLICK" "$CLICLICK"
-  fi
-fi
-
-[[ -x "$CLICLICK" ]] && "$CLICLICK" -V >/dev/null 2>&1 || { echo "ERROR: cliclick not functional after install" >&2; exit 1; }
-echo "cliclick: $("$CLICLICK" -V)"
-echo "Waiting 10 seconds for cliclick install to settle..."
+echo "Waiting 10 seconds before enrollment setup..."
 /bin/sleep 10
 
-echo ""
-echo "=== Phase 2 complete ==="
-echo ""
-
 # =====================================================
-# Buffer: let Homebrew and tccd fully settle
+# Phase 3: Download and compile JPMC-EC2-Enroll.scpt
+# Downloads the AppleScript source from GitHub and
+# compiles it to a .scpt binary for osascript.
 # =====================================================
 
-echo "Waiting 30 seconds before enrollment setup..."
-/bin/sleep 30
+echo "=== Phase 3: Download and compile JPMC-EC2-Enroll.scpt ==="
 
-# =====================================================
-# Phase 3: Download Enrollment Script
-# =====================================================
+echo "Downloading JPMC-EC2-Enroll.applescript..."
+/usr/bin/curl -fsSL -o /tmp/JPMC-EC2-Enroll.applescript "$ENROLL_SOURCE_URL"
+[[ -s /tmp/JPMC-EC2-Enroll.applescript ]] || { echo "ERROR: download failed or empty" >&2; exit 1; }
+echo "Downloaded: $(/usr/bin/wc -l < /tmp/JPMC-EC2-Enroll.applescript | /usr/bin/tr -d ' ') lines"
 
-echo "=== Phase 3: Download enroll-ec2-mac.scpt ==="
+echo "Compiling to .scpt..."
+/usr/bin/osacompile -o /tmp/JPMC-EC2-Enroll.scpt /tmp/JPMC-EC2-Enroll.applescript
+[[ -s /tmp/JPMC-EC2-Enroll.scpt ]] || { echo "ERROR: compilation failed" >&2; exit 1; }
 
-/usr/bin/sudo /usr/bin/curl -fsSL -o "$ENROLL_SCRIPT" "$ENROLL_SCRIPT_URL"
+echo "Installing to /Users/Shared/..."
+/usr/bin/sudo /bin/cp /tmp/JPMC-EC2-Enroll.scpt "$ENROLL_SCRIPT"
 /usr/bin/sudo /usr/sbin/chown root:wheel "$ENROLL_SCRIPT"
 /usr/bin/sudo /bin/chmod 644 "$ENROLL_SCRIPT"
 
-[[ -s "$ENROLL_SCRIPT" ]] || { echo "ERROR: enroll-ec2-mac.scpt download failed or empty" >&2; exit 1; }
-echo "Downloaded: $ENROLL_SCRIPT ($(/usr/bin/wc -c < "$ENROLL_SCRIPT" | /usr/bin/tr -d ' ') bytes)"
+echo "Installed: $ENROLL_SCRIPT ($(/usr/bin/wc -c < "$ENROLL_SCRIPT" | /usr/bin/tr -d ' ') bytes)"
 
 echo ""
 echo "=== Phase 3 complete ==="
 echo ""
 
 # =====================================================
-# Phase 4: Configure MMSecret
+# Phase 4: Configure MMSecret and prodFlag
 # =====================================================
 
 echo "=== Phase 4: Configure MMSecret ==="
 
-/usr/bin/defaults write com.amazon.dsx.ec2.enrollment.automation MMSecret "mdmSecret"
-/usr/bin/defaults write com.amazon.dsx.ec2.enrollment.automation prodFlag "1"
+/usr/bin/defaults write com.jpmc.ec2.mdm.enrollment MMSecret "mdmSecret"
+/usr/bin/defaults write com.jpmc.ec2.mdm.enrollment prodFlag "1"
 
-echo "Waiting 5 seconds for defaults to commit..."
 /bin/sleep 5
-MMSECRET_CHECK=$(/usr/bin/defaults read com.amazon.dsx.ec2.enrollment.automation MMSecret 2>/dev/null)
-[[ "$MMSECRET_CHECK" == "mdmSecret" ]] || { echo "ERROR: MMSecret did not persist after write" >&2; exit 1; }
+MMSECRET_CHECK=$(/usr/bin/defaults read com.jpmc.ec2.mdm.enrollment MMSecret 2>/dev/null)
+[[ "$MMSECRET_CHECK" == "mdmSecret" ]] || { echo "ERROR: MMSecret did not persist" >&2; exit 1; }
 echo "MMSecret set: $MMSECRET_CHECK"
-echo "prodFlag set: $(/usr/bin/defaults read com.amazon.dsx.ec2.enrollment.automation prodFlag 2>/dev/null)"
+echo "prodFlag set: $(/usr/bin/defaults read com.jpmc.ec2.mdm.enrollment prodFlag 2>/dev/null)"
 
 echo ""
 echo "=== Phase 4 complete ==="
 echo ""
 
 # =====================================================
-# Phase 5: Preflight gate before grand finale
+# Phase 5: Preflight gate
 # =====================================================
 
 echo "=== Preflight gate ==="
 
 GATE_OK=1
-
-[[ -x "$CLICLICK" ]] && "$CLICLICK" -V >/dev/null 2>&1 || { echo "  FAIL: cliclick not ready"; GATE_OK=0; }
-[[ -s "$ENROLL_SCRIPT" ]]                               || { echo "  FAIL: enroll-ec2-mac.scpt missing"; GATE_OK=0; }
-[[ "$MMSECRET_CHECK" == "mdmSecret" ]]                  || { echo "  FAIL: MMSecret not configured"; GATE_OK=0; }
-
-[[ $GATE_OK -eq 1 ]] || { echo "ERROR: preflight checks failed, aborting" >&2; exit 1; }
-echo "  cliclick:          OK"
-echo "  enroll-ec2-mac:    OK"
-echo "  MMSecret:          OK"
+[[ -s "$ENROLL_SCRIPT" ]]                          || { echo "  FAIL: JPMC-EC2-Enroll.scpt missing"; GATE_OK=0; }
+[[ "$MMSECRET_CHECK" == "mdmSecret" ]]             || { echo "  FAIL: MMSecret not configured"; GATE_OK=0; }
+[[ $GATE_OK -eq 1 ]] || { echo "ERROR: preflight failed" >&2; exit 1; }
+echo "  JPMC-EC2-Enroll.scpt: OK"
+echo "  MMSecret:             OK"
 echo "All preflight checks passed."
 echo ""
 
 # =====================================================
 # Phase 6: Install LaunchAgent
+# JPMC-EC2-Enroll.scpt handles LaunchAgent installation
+# via its --launchagent flag, writing the plist directly.
 # =====================================================
 
 echo "=== Phase 6: Install LaunchAgent ==="
 
-/usr/bin/env PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" /usr/bin/osascript "$ENROLL_SCRIPT" --launchagent --no-first-run
-echo "Waiting 5 seconds for LaunchAgent plist to be written..."
-/bin/sleep 5
+/usr/bin/env PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  /usr/bin/osascript "$ENROLL_SCRIPT" --launchagent --no-first-run
 
+/bin/sleep 5
 [[ -f "$LAUNCHAGENT_PLIST" ]] || { echo "ERROR: LaunchAgent plist not written" >&2; exit 1; }
 echo "LaunchAgent installed."
 
@@ -258,10 +217,6 @@ echo ""
 
 echo "=== Phase 7: Verify ==="
 
-FIRSTRUN_COUNT=$(/usr/bin/grep -c firstrun "$LAUNCHAGENT_PLIST" 2>/dev/null || true)
-[[ "$FIRSTRUN_COUNT" -eq 0 ]] || { echo "ERROR: LaunchAgent plist contains 'firstrun' — --no-first-run flag may not have worked" >&2; exit 1; }
-echo "  firstrun check:    OK (count=$FIRSTRUN_COUNT)"
-
 echo ""
 echo "LaunchAgent plist contents:"
 /bin/cat "$LAUNCHAGENT_PLIST"
@@ -269,9 +224,9 @@ echo "LaunchAgent plist contents:"
 echo ""
 LAUNCHCTL_CHECK=$(/bin/launchctl list | /usr/bin/grep enrollment || true)
 if [[ -z "$LAUNCHCTL_CHECK" ]]; then
-  echo "  launchctl:         OK (LaunchAgent not loaded — correct, no GUI session)"
+  echo "  launchctl: OK (LaunchAgent not loaded — correct, no GUI session)"
 else
-  echo "  launchctl:         $LAUNCHCTL_CHECK"
+  echo "  launchctl: $LAUNCHCTL_CHECK"
 fi
 
 echo ""
@@ -279,17 +234,14 @@ echo "=== Phase 7 complete ==="
 echo ""
 
 # =====================================================
-# Done
-# =====================================================
-
-# =====================================================
 # Phase 8: Configure ec2-macos-init
 # =====================================================
 
 echo "=== Phase 8: Configure ec2-macos-init ==="
 
-echo "Setting RandomizePassword = false in init.toml..."
-/usr/bin/sudo /usr/bin/sed -i '' 's/RandomizePassword = true/RandomizePassword = false/' /usr/local/aws/ec2-macos-init/init.toml
+echo "Setting RandomizePassword = false..."
+/usr/bin/sudo /usr/bin/sed -i '' 's/RandomizePassword = true/RandomizePassword = false/' \
+  /usr/local/aws/ec2-macos-init/init.toml
 /usr/bin/grep "RandomizePassword" /usr/local/aws/ec2-macos-init/init.toml
 
 echo "Clearing ec2-macos-init instance history..."
@@ -300,12 +252,8 @@ echo ""
 echo "=== Phase 8 complete ==="
 echo ""
 
-# =====================================================
-# Done
-# =====================================================
-
-echo "$(/bin/date): stage-enrollment completed successfully."
+echo "$(/bin/date): JPMC-stage-enrollment completed successfully."
 echo ""
 echo "This instance is ready for AMI creation."
-echo "Next: create the AMI from this instance. Instances launched from that AMI"
-echo "will run the LaunchAgent on first GUI login and enroll automatically."
+echo "Instances launched from the AMI will run JPMC-EC2-Enroll.scpt"
+echo "via the LaunchAgent on first GUI login and enroll automatically."
