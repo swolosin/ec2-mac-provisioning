@@ -162,7 +162,7 @@ end createJamfInvitation
 on buildEnrollmentProfile(invitationID, jamfURL)
 	set payloadUUID to (do shell script "uuidgen | tr '[:upper:]' '[:lower:]'")
 	set payloadID to (do shell script "uuidgen")
-	return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>PayloadUUID</key><string>" & payloadUUID & "</string><key>PayloadOrganization</key><string>JAMF Software</string><key>PayloadVersion</key><integer>1</integer><key>PayloadIdentifier</key><string>" & payloadID & "</string><key>PayloadDescription</key><string>MDM Profile</string><key>PayloadType</key><string>Profile Service</string><key>PayloadDisplayName</key><string>MDM Profile</string><key>PayloadContent</key><dict><key>Challenge</key><string>" & invitationID & "</string><key>URL</key><string>" & jamfURL & "enroll/profile</string><key>DeviceAttributes</key><array><string>UDID</string><string>PRODUCT</string><string>SERIAL</string><string>VERSION</string><string>DEVICE_NAME</string></array></dict></dict></plist>"
+	return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>PayloadUUID</key><string>" & payloadUUID & "</string><key>PayloadOrganization</key><string>JAMF Software</string><key>PayloadVersion</key><integer>1</integer><key>PayloadIdentifier</key><string>" & payloadID & "</string><key>PayloadDescription</key><string>MDM Profile</string><key>PayloadType</key><string>Profile Service</string><key>PayloadDisplayName</key><string>MDM Profile</string><key>PayloadContent</key><dict><key>Challenge</key><string>" & invitationID & "</string><key>URL</key><string>" & jamfURL & "enroll/profile</string><key>DeviceAttributes</key><array><string>UDID</string><string>PRODUCT</string><string>SERIAL</string><string>VERSION</string><string>DEVICE_NAME</string><string>COMPROMISED</string></array></dict></dict></plist>"
 end buildEnrollmentProfile
 
 -- ============================================================
@@ -176,8 +176,10 @@ on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
 	do shell script "open /tmp/enrollmentProfile.mobileconfig"
 	delay 2
 
-	-- Dismiss the notification (Return = blue OK button) and navigate to Device Management
+	-- Activate Settings and dismiss the "Profile Downloaded" notification (Return = blue OK button)
 	my logMsg("Tahoe: dismissing profile notification...")
+	tell application settingsApp to activate
+	delay 0.5
 	tell application "System Events" to key code 36
 	delay 2
 
@@ -625,6 +627,17 @@ on run argv
 
 	if enrolled then
 		my logMsg("=== JPMC-EC2-Enroll: SUCCESS ===")
+
+		-- Enable screen sharing so the instance is accessible via VNC after enrollment
+		my logMsg("Enabling screen sharing...")
+		try
+			do shell script "launchctl enable system/com.apple.screensharing" user name localAdmin password adminPass with administrator privileges
+			do shell script "launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist" user name localAdmin password adminPass with administrator privileges
+			my logMsg("Screen sharing enabled.")
+		on error errMsg
+			my logMsg("WARNING: could not enable screen sharing: " & errMsg)
+		end try
+
 		if doProdCleanup then my runCleanup(localAdmin, adminPass)
 	else
 		my logMsg("=== JPMC-EC2-Enroll: FAILED — enrollment did not complete. Check /Library/Logs/JPMC/EC2-Enroll.log and Jamf Pro ===")

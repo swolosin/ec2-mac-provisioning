@@ -210,7 +210,7 @@ echo "=== Preflight gate ==="
 
 GATE_OK=1
 [[ -s "$ENROLL_SCRIPT" ]]                          || { echo "  FAIL: JPMC-EC2-Enroll.scpt missing"; GATE_OK=0; }
-[[ "$MMSECRET_CHECK" == "mdmSecret" ]]             || { echo "  FAIL: MMSecret not configured"; GATE_OK=0; }
+[[ "$MMSECRET_CHECK" == "$SECRET_ID" ]]            || { echo "  FAIL: MMSecret not configured"; GATE_OK=0; }
 [[ $GATE_OK -eq 1 ]] || { echo "ERROR: preflight failed" >&2; exit 1; }
 echo "  JPMC-EC2-Enroll.scpt: OK"
 echo "  MMSecret:             OK"
