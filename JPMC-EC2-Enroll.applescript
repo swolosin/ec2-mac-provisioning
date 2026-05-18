@@ -452,8 +452,6 @@ end waitForEnrollment
 
 on runCleanup(localAdmin, adminPass)
 	my logMsg("Running prodFlag cleanup...")
-	set awsPath to "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin"
-
 	try
 		do shell script "tccutil reset Accessibility" user name localAdmin password adminPass with administrator privileges
 		my logMsg("Cleanup: TCC Accessibility reset")
@@ -473,9 +471,6 @@ on runCleanup(localAdmin, adminPass)
 	try
 		do shell script "rm -f /tmp/enrollmentProfile.mobileconfig" user name localAdmin password adminPass with administrator privileges
 		my logMsg("Cleanup: enrollment profile removed")
-	end try
-	try
-		do shell script "PATH=" & awsPath & " ; export HOMEBREW_NO_AUTO_UPDATE=1 ; brew uninstall cliclick 2>/dev/null; true"
 	end try
 	try
 		do shell script "launchctl unload -w /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist" user name localAdmin password adminPass with administrator privileges
