@@ -36,8 +36,24 @@ set -euo pipefail
 readonly SECRET_ID="mdmSecret"
 readonly PROD_FLAG="0"
 
-readonly ENROLL_SCRIPT="/Users/Shared/JPMC-EC2-Enroll.scpt"
+# =====================================================
+# SOURCE URLS
+# When moving to internal infrastructure, update these
+# two URLs — everything else stays the same.
+#
+# ENROLL_SOURCE_URL: raw URL to JPMC-EC2-Enroll.applescript
+#   Current:  GitHub (public)
+#   Future:   internal GitHub/Bitbucket raw URL
+#
+# CLICLICK_SOURCE: "brew" to install via Homebrew, or set to
+#   a direct download URL for the cliclick binary
+#   Current:  "brew"
+#   Future:   "https://artifactory.internal/tools/cliclick"
+# =====================================================
 readonly ENROLL_SOURCE_URL="https://raw.githubusercontent.com/swolosin/ec2-mac-provisioning/main/JPMC-EC2-Enroll.applescript"
+readonly CLICLICK_SOURCE="brew"
+
+readonly ENROLL_SCRIPT="/Users/Shared/JPMC-EC2-Enroll.scpt"
 readonly LAUNCHAGENT_PLIST="/Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist"
 
 echo "$(/bin/date): JPMC-stage-enrollment started"
@@ -166,28 +182,37 @@ echo "Waiting 10 seconds before enrollment setup..."
 echo "=== Phase 2: Install cliclick ==="
 
 BREW=""
-if [[ -x "/opt/homebrew/bin/brew" ]]; then
-  BREW="/opt/homebrew/bin/brew"
-elif [[ -x "/usr/local/bin/brew" ]]; then
-  BREW="/usr/local/bin/brew"
-else
-  echo "Installing Homebrew..."
-  NONINTERACTIVE=1 /bin/bash -c "$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+if [[ "$CLICLICK_SOURCE" == "brew" ]]; then
   if [[ -x "/opt/homebrew/bin/brew" ]]; then
     BREW="/opt/homebrew/bin/brew"
   elif [[ -x "/usr/local/bin/brew" ]]; then
     BREW="/usr/local/bin/brew"
   else
-    echo "ERROR: Homebrew install completed but brew binary not found" >&2; exit 1
+    echo "Installing Homebrew..."
+    NONINTERACTIVE=1 /bin/bash -c "$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    if [[ -x "/opt/homebrew/bin/brew" ]]; then
+      BREW="/opt/homebrew/bin/brew"
+    elif [[ -x "/usr/local/bin/brew" ]]; then
+      BREW="/usr/local/bin/brew"
+    else
+      echo "ERROR: Homebrew install completed but brew binary not found" >&2; exit 1
+    fi
   fi
 fi
 
-echo "Installing cliclick via $BREW..."
-export HOMEBREW_NO_AUTO_UPDATE=1
-"$BREW" install cliclick
-
-CLICLICK_BIN=$("$BREW" --prefix cliclick)/bin/cliclick
-[[ -x "$CLICLICK_BIN" ]] || { echo "ERROR: cliclick not found after install" >&2; exit 1; }
+if [[ "$CLICLICK_SOURCE" == "brew" ]]; then
+  echo "Installing cliclick via Homebrew..."
+  export HOMEBREW_NO_AUTO_UPDATE=1
+  "$BREW" install cliclick
+  CLICLICK_BIN=$("$BREW" --prefix cliclick)/bin/cliclick
+  [[ -x "$CLICLICK_BIN" ]] || { echo "ERROR: cliclick not found after Homebrew install" >&2; exit 1; }
+else
+  echo "Downloading cliclick from $CLICLICK_SOURCE..."
+  /usr/bin/curl -fsSL -o /tmp/cliclick "$CLICLICK_SOURCE"
+  [[ -s /tmp/cliclick ]] || { echo "ERROR: cliclick download failed or empty" >&2; exit 1; }
+  /bin/chmod +x /tmp/cliclick
+  CLICLICK_BIN="/tmp/cliclick"
+fi
 
 echo "Caching cliclick to /Users/Shared/._jpmc-tools/..."
 /usr/bin/sudo /bin/mkdir -p /Users/Shared/._jpmc-tools

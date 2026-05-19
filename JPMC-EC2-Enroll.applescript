@@ -267,10 +267,11 @@ end clickRowWithFallback
 
 -- ============================================================
 -- PROFILE INSTALLATION: macOS 26 TAHOE
--- 1. Open mobileconfig — "Profile Downloaded" dialog appears and
---    auto-dismisses in ~10 seconds. Do not interact with it.
--- 2. Navigate directly to Device Management via URL scheme.
--- 3. Wait for profile row to appear, then double-click it.
+-- 1. Open mobileconfig — "Profile Downloaded" popup appears with
+--    a blue button. Press Return to click it, which navigates
+--    Settings directly to Device Management.
+-- 2. URL scheme + reveal pane id as safety net for navigation.
+-- 3. Find MDM Profile row by name, cliclick dc:x,y with retries.
 -- ============================================================
 
 on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
@@ -644,6 +645,10 @@ on runCleanup(localAdmin, adminPass)
 	try
 		do shell script "rm -rf /Users/Shared/._jpmc-tools" user name localAdmin password adminPass with administrator privileges
 		my logMsg("Cleanup: cliclick tools directory removed")
+	end try
+	try
+		do shell script "rm -f /Users/Shared/JPMC-EC2-Enroll.scpt" user name localAdmin password adminPass with administrator privileges
+		my logMsg("Cleanup: JPMC-EC2-Enroll.scpt removed")
 	end try
 	try
 		do shell script "launchctl unload -w /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist" user name localAdmin password adminPass with administrator privileges
