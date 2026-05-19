@@ -181,12 +181,13 @@ on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
 	my logMsg("Tahoe: waiting for Profile Downloaded dialog to auto-dismiss...")
 	delay 15
 
-	-- Navigate directly to Device Management
+	-- Navigate directly to Device Management using native pane ID
 	my logMsg("Tahoe: navigating to Device Management...")
-	do shell script "open x-apple.systempreferences:com.apple.preferences.configurationprofiles.extension"
+	tell application "System Settings"
+		reveal pane id "com.apple.Profiles-Settings.extension"
+		activate
+	end tell
 	delay 2
-	tell application settingsApp to activate
-	delay 1
 
 	-- Wait for the MDM Profile row to appear in the outline
 	my logMsg("Tahoe: waiting for MDM Profile row...")
