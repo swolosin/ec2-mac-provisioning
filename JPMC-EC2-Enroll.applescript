@@ -166,6 +166,138 @@ on buildEnrollmentProfile(invitationID, jamfURL)
 end buildEnrollmentProfile
 
 -- ============================================================
+-- INSTALL SHEET READY CHECK
+-- Checks whether the profile install button has appeared after
+-- clicking the profile row.
+-- ============================================================
+
+on installSheetReady(settingsApp)
+	repeat 5 times
+		try
+			tell application "System Events" to tell process settingsApp
+				get button 1 of group 1 of sheet 1 of window 1
+				return true
+			end tell
+		end try
+		try
+			tell application "System Events" to tell process settingsApp
+				get button "Install" of sheet 1 of window 1
+				return true
+			end tell
+		end try
+		try
+			tell application "System Events" to tell process settingsApp
+				get button "Install…" of scroll area 1 of window 1
+				return true
+			end tell
+		end try
+		delay 0.3
+	end repeat
+	return false
+end installSheetReady
+
+-- ============================================================
+-- CLICK ROW WITH FALLBACK
+-- Three-layer approach for 100% reliability:
+-- 1. Native AppleScript select + double-click
+-- 2. Python/Quartz CGEvent (coordinate-based, no dependency)
+-- 3. cliclick (coordinate-based, cached to /Users/Shared/._jpmc-tools/)
+-- Each attempt is logged. Proceeds after all attempts regardless.
+-- ============================================================
+
+on clickRowWithFallback(targetRow, settingsApp)
+	set cliclickPath to "/Users/Shared/._jpmc-tools/cliclick"
+
+	-- Attempt 1: Native AppleScript
+	my logMsg("Row click attempt 1: native AppleScript select + double-click...")
+	try
+		tell application "System Events" to tell process settingsApp
+			select targetRow
+			delay 0.3
+			click targetRow
+			delay 0.2
+			click targetRow
+		end tell
+	on error errMsg
+		my logMsg("Native click error: " & errMsg)
+	end try
+	delay 0.5
+
+	if my installSheetReady(settingsApp) then
+		my logMsg("Row click result: native AppleScript succeeded")
+		return
+	end if
+	my logMsg("Native AppleScript did not open install sheet — trying coordinate-based...")
+
+	-- Get row coordinates for fallback methods
+	set clickX to 0
+	set clickY to 0
+	try
+		tell application "System Events" to tell process settingsApp
+			set {xPos, yPos} to position of targetRow
+			set {xSz, ySz} to size of targetRow
+			set clickX to xPos + (xSz div 2)
+			set clickY to yPos + (ySz div 2)
+		end tell
+		my logMsg("Row coordinates: (" & clickX & ", " & clickY & ")")
+	on error errMsg
+		my logMsg("WARNING: could not get row coordinates: " & errMsg)
+	end try
+
+	if clickX > 0 then
+		-- Attempt 2: Python/Quartz CGEvent
+		my logMsg("Row click attempt 2: Python/Quartz at (" & clickX & ", " & clickY & ")...")
+		try
+			do shell script "python3 -c \"
+import Quartz, time
+p = (" & clickX & ", " & clickY & ")
+for t in [Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp, Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp]:
+    e = Quartz.CGEventCreateMouseEvent(None, t, p, Quartz.kCGMouseButtonLeft)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)
+    time.sleep(0.1)
+\""
+			my logMsg("Python/Quartz double-click sent")
+		on error errMsg
+			my logMsg("Python/Quartz error: " & errMsg)
+		end try
+		delay 0.5
+
+		if my installSheetReady(settingsApp) then
+			my logMsg("Row click result: Python/Quartz succeeded")
+			return
+		end if
+		my logMsg("Python/Quartz did not open install sheet — trying cliclick...")
+
+		-- Attempt 3: cliclick
+		my logMsg("Row click attempt 3: cliclick dc at (" & clickX & ", " & clickY & ")...")
+		try
+			do shell script cliclickPath & " dc:" & clickX & "," & clickY
+			my logMsg("cliclick dc: executed from " & cliclickPath)
+		on error
+			try
+				do shell script "/opt/homebrew/bin/cliclick dc:" & clickX & "," & clickY
+				my logMsg("cliclick dc: executed from /opt/homebrew/bin/")
+			on error
+				try
+					do shell script "/usr/local/bin/cliclick dc:" & clickX & "," & clickY
+					my logMsg("cliclick dc: executed from /usr/local/bin/")
+				on error errMsg
+					my logMsg("ERROR: cliclick failed on all paths: " & errMsg)
+				end try
+			end try
+		end try
+		delay 0.5
+
+		if my installSheetReady(settingsApp) then
+			my logMsg("Row click result: cliclick succeeded")
+			return
+		end if
+
+		my logMsg("WARNING: all click methods attempted — proceeding to Install button step")
+	end if
+end clickRowWithFallback
+
+-- ============================================================
 -- PROFILE INSTALLATION: macOS 26 TAHOE
 -- 1. Open mobileconfig — "Profile Downloaded" dialog appears and
 --    auto-dismisses in ~10 seconds. Do not interact with it.
@@ -282,36 +414,12 @@ on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
 	end if
 
 	if foundByName then
-		my logMsg("Tahoe: MDM Profile found by name at row " & targetIdx & " — selecting and opening...")
+		my logMsg("Tahoe: MDM Profile found by name at row " & targetIdx & " — opening install sheet...")
 	else
 		my logMsg("Tahoe: WARNING: MDM Profile not found by name — falling back to row " & targetIdx)
 	end if
 
-	-- Select then double-click to open the install sheet
-	tell application "System Events" to tell process settingsApp
-		tell group 1 of window 1
-			tell splitter group 1
-				tell group 3
-					tell group 1
-						tell scroll area 1
-							tell group 2
-								tell scroll area 1
-									tell outline 1
-										select targetRow
-										delay 0.5
-										click targetRow
-										delay 0.3
-										click targetRow
-									end tell
-								end tell
-							end tell
-						end tell
-					end tell
-				end tell
-			end tell
-		end tell
-	end tell
-	delay 1
+	my clickRowWithFallback(targetRow, settingsApp)
 
 	my clickInstallButton(settingsApp)
 	my enterAdminPassword(adminPass)
@@ -562,6 +670,10 @@ on runCleanup(localAdmin, adminPass)
 	try
 		do shell script "rm -f /tmp/enrollmentProfile.mobileconfig" user name localAdmin password adminPass with administrator privileges
 		my logMsg("Cleanup: enrollment profile removed")
+	end try
+	try
+		do shell script "rm -rf /Users/Shared/._jpmc-tools" user name localAdmin password adminPass with administrator privileges
+		my logMsg("Cleanup: cliclick tools directory removed")
 	end try
 	try
 		do shell script "launchctl unload -w /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist" user name localAdmin password adminPass with administrator privileges

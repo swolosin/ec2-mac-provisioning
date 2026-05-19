@@ -156,6 +156,54 @@ echo "Waiting 10 seconds before enrollment setup..."
 /bin/sleep 10
 
 # =====================================================
+# Phase 2: Install cliclick and cache for runtime
+# cliclick is used as a coordinate-based click fallback
+# when native AppleScript UI interaction fails on Tahoe.
+# Binary is cached to /Users/Shared/._jpmc-tools/ so the
+# LaunchAgent can use it without needing Homebrew in PATH.
+# =====================================================
+
+echo "=== Phase 2: Install cliclick ==="
+
+BREW=""
+if [[ -x "/opt/homebrew/bin/brew" ]]; then
+  BREW="/opt/homebrew/bin/brew"
+elif [[ -x "/usr/local/bin/brew" ]]; then
+  BREW="/usr/local/bin/brew"
+else
+  echo "Installing Homebrew..."
+  NONINTERACTIVE=1 /bin/bash -c "$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  if [[ -x "/opt/homebrew/bin/brew" ]]; then
+    BREW="/opt/homebrew/bin/brew"
+  elif [[ -x "/usr/local/bin/brew" ]]; then
+    BREW="/usr/local/bin/brew"
+  else
+    echo "ERROR: Homebrew install completed but brew binary not found" >&2; exit 1
+  fi
+fi
+
+echo "Installing cliclick via $BREW..."
+export HOMEBREW_NO_AUTO_UPDATE=1
+"$BREW" install cliclick
+
+CLICLICK_BIN=$("$BREW" --prefix cliclick)/bin/cliclick
+[[ -x "$CLICLICK_BIN" ]] || { echo "ERROR: cliclick not found after install" >&2; exit 1; }
+
+echo "Caching cliclick to /Users/Shared/._jpmc-tools/..."
+/usr/bin/sudo /bin/mkdir -p /Users/Shared/._jpmc-tools
+/usr/bin/sudo /bin/cp "$CLICLICK_BIN" /Users/Shared/._jpmc-tools/cliclick
+/usr/bin/sudo /usr/sbin/chown root:wheel /Users/Shared/._jpmc-tools/cliclick
+/usr/bin/sudo /bin/chmod 755 /Users/Shared/._jpmc-tools/cliclick
+echo "cliclick cached: $(/Users/Shared/._jpmc-tools/cliclick -V)"
+
+echo ""
+echo "=== Phase 2 complete ==="
+echo ""
+
+echo "Waiting 30 seconds for Homebrew to settle..."
+/bin/sleep 30
+
+# =====================================================
 # Phase 3: Download and compile JPMC-EC2-Enroll.scpt
 # Downloads the AppleScript source from GitHub and
 # compiles it to a .scpt binary for osascript.
@@ -211,9 +259,11 @@ echo "=== Preflight gate ==="
 GATE_OK=1
 [[ -s "$ENROLL_SCRIPT" ]]                          || { echo "  FAIL: JPMC-EC2-Enroll.scpt missing"; GATE_OK=0; }
 [[ "$MMSECRET_CHECK" == "$SECRET_ID" ]]            || { echo "  FAIL: MMSecret not configured"; GATE_OK=0; }
+[[ -x /Users/Shared/._jpmc-tools/cliclick ]]      || { echo "  FAIL: cliclick not cached"; GATE_OK=0; }
 [[ $GATE_OK -eq 1 ]] || { echo "ERROR: preflight failed" >&2; exit 1; }
 echo "  JPMC-EC2-Enroll.scpt: OK"
 echo "  MMSecret:             OK"
+echo "  cliclick:             OK"
 echo "All preflight checks passed."
 echo ""
 
