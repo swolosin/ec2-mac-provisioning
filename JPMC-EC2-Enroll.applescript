@@ -324,13 +324,22 @@ on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
 	tell application "System Events" to keystroke return
 	delay 2
 
-	-- Navigate to Device Management as a safety net in case Return landed elsewhere
+	-- Navigate to Device Management as a safety net in case Return landed elsewhere.
+	-- Try reveal pane id first, URL scheme as backup (Apple moved to ExtensionKit
+	-- with no public docs, so both are included for reliability).
 	my logMsg("Tahoe: ensuring Device Management is open...")
-	tell application "System Settings"
-		reveal pane id "com.apple.Profiles-Settings.extension"
-		activate
-	end tell
+	try
+		tell application "System Settings"
+			reveal pane id "com.apple.Profiles-Settings.extension"
+			activate
+		end tell
+	end try
+	try
+		do shell script "open 'x-apple.systempreferences:com.apple.preferences.configurationprofiles'"
+	end try
 	delay 2
+	tell application settingsApp to activate
+	delay 1
 
 	-- Wait for the MDM Profile row to appear in the outline
 	my logMsg("Tahoe: waiting for MDM Profile row...")
