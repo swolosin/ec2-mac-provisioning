@@ -58,8 +58,8 @@ end getProdFlag
 -- ============================================================
 
 on imdsGet(mdPath)
-	set maxAttempts to 6
-	set retryDelay to 5
+	set maxAttempts to 12
+	set retryDelay to 10
 	set awsPath to "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 	repeat with attempt from 1 to maxAttempts
 		try
