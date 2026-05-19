@@ -229,9 +229,9 @@ on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
 		my logMsg("ERROR: Tahoe: MDM Profile row not found in Device Management")
 		error "Tahoe: MDM Profile not found"
 	end if
-	my logMsg("Tahoe: MDM Profile found — double-clicking to open...")
+	my logMsg("Tahoe: MDM Profile found — selecting and opening...")
 
-	-- Double-click the profile row to open it
+	-- Select row then double-click to open the install sheet
 	tell application "System Events" to tell process settingsApp
 		tell group 1 of window 1
 			tell splitter group 1
@@ -241,6 +241,8 @@ on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
 							tell group 2
 								tell scroll area 1
 									tell outline 1
+										select row 2
+										delay 0.5
 										click row 2
 										delay 0.3
 										click row 2
