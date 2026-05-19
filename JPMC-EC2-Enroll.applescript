@@ -167,60 +167,87 @@ end buildEnrollmentProfile
 
 -- ============================================================
 -- PROFILE INSTALLATION: macOS 26 TAHOE
--- Opening Profiles.prefPane on Tahoe navigates directly to
--- Device Management — no sidebar navigation needed.
+-- 1. Open mobileconfig — "Profile Downloaded" dialog appears and
+--    auto-dismisses in ~10 seconds. Do not interact with it.
+-- 2. Navigate directly to Device Management via URL scheme.
+-- 3. Wait for profile row to appear, then double-click it.
 -- ============================================================
 
 on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
 	my logMsg("Tahoe: opening enrollment profile...")
 	do shell script "open /tmp/enrollmentProfile.mobileconfig"
-	delay 2
 
-	-- Activate Settings and dismiss the "Profile Downloaded" notification (Return = blue OK button)
-	my logMsg("Tahoe: dismissing profile notification...")
-	tell application settingsApp to activate
-	delay 0.5
-	tell application "System Events" to key code 36
-	delay 2
+	-- Wait for the "Profile Downloaded" dialog to auto-dismiss (~10s)
+	my logMsg("Tahoe: waiting for Profile Downloaded dialog to auto-dismiss...")
+	delay 15
 
-	my logMsg("Tahoe: activating System Settings...")
+	-- Navigate directly to Device Management
+	my logMsg("Tahoe: navigating to Device Management...")
+	do shell script "open x-apple.systempreferences:com.apple.preferences.configurationprofiles.extension"
+	delay 2
 	tell application settingsApp to activate
 	delay 1
 
-	-- Wait for the profile cell in Tahoe's UI structure (group 3)
-	my logMsg("Tahoe: waiting for profile cell...")
+	-- Wait for the MDM Profile row to appear in the outline
+	my logMsg("Tahoe: waiting for MDM Profile row...")
 	set profileFound to false
-	repeat 30 times
+	repeat 20 times
 		try
 			tell application "System Events" to tell process settingsApp
-				get static text 2 of UI element 1 of row 2 of outline 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 3 of splitter group 1 of group 1 of window 1
-				set profileFound to true
-				exit repeat
+				tell group 1 of window 1
+					tell splitter group 1
+						tell group 3
+							tell group 1
+								tell scroll area 1
+									tell group 2
+										tell scroll area 1
+											tell outline 1
+												if (count of rows) >= 2 then
+													set profileFound to true
+												end if
+											end tell
+										end tell
+									end tell
+								end tell
+							end tell
+						end tell
+					end tell
+				end tell
 			end tell
 		end try
-		-- Some builds need a button click to enter Device Management sub-view
-		try
-			tell application "System Events" to tell process settingsApp
-				click button 1 of group 6 of scroll area 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
-			end tell
-		end try
+		if profileFound then exit repeat
 		delay 0.5
 	end repeat
 
 	if not profileFound then
-		my logMsg("ERROR: Tahoe: profile cell not found after 15 seconds")
-		error "Tahoe: profile cell not found after 15 seconds"
+		my logMsg("ERROR: Tahoe: MDM Profile row not found in Device Management")
+		error "Tahoe: MDM Profile not found"
 	end if
-	my logMsg("Tahoe: profile cell found — clicking to open detail view...")
+	my logMsg("Tahoe: MDM Profile found — double-clicking to open...")
 
-	-- Click the profile cell to select it (two clicks = open detail view)
+	-- Double-click the profile row to open it
 	tell application "System Events" to tell process settingsApp
-		set profileCell to row 2 of outline 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 3 of splitter group 1 of group 1 of window 1
-		click profileCell
-		delay 0.5
-		click profileCell
-		delay 1
+		tell group 1 of window 1
+			tell splitter group 1
+				tell group 3
+					tell group 1
+						tell scroll area 1
+							tell group 2
+								tell scroll area 1
+									tell outline 1
+										click row 2
+										delay 0.3
+										click row 2
+									end tell
+								end tell
+							end tell
+						end tell
+					end tell
+				end tell
+			end tell
+		end tell
 	end tell
+	delay 1
 
 	my clickInstallButton(settingsApp)
 	my enterAdminPassword(adminPass)
