@@ -245,6 +245,10 @@ on clickRowWithFallback(targetRow, settingsApp)
 	end try
 
 	if clickX > 0 then
+		-- Activate Settings before coordinate-based clicks (matches AWS approach)
+		tell application settingsApp to activate
+		delay 1
+
 		-- Attempt 2: Python/Quartz CGEvent
 		my logMsg("Row click attempt 2: Python/Quartz at (" & clickX & ", " & clickY & ")...")
 		try
@@ -268,8 +272,10 @@ for t in [Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp, Quartz.kCGEv
 		end if
 		my logMsg("Python/Quartz did not open install sheet — trying cliclick...")
 
-		-- Attempt 3: cliclick
+		-- Attempt 3: cliclick (matches AWS: dc:x,y at center of profile cell)
 		my logMsg("Row click attempt 3: cliclick dc at (" & clickX & ", " & clickY & ")...")
+		tell application settingsApp to activate
+		delay 1
 		try
 			do shell script cliclickPath & " dc:" & clickX & "," & clickY
 			my logMsg("cliclick dc: executed from " & cliclickPath)
@@ -495,15 +501,9 @@ on installProfile_Ventura(adminPass, localAdmin, settingsApp, macMajor)
 		my logMsg("ERROR: Sonoma/Sequoia: profile cell not found after 15 seconds")
 		error "Sonoma/Sequoia: profile cell not found"
 	end if
-	my logMsg("Sonoma/Sequoia: profile cell found — clicking to open detail view...")
+	my logMsg("Sonoma/Sequoia: profile cell found — opening install sheet...")
 
-	-- Click the profile cell
-	tell application "System Events" to tell process settingsApp
-		click profileCell
-		delay 0.5
-		click profileCell
-		delay 1
-	end tell
+	my clickRowWithFallback(profileCell, settingsApp)
 
 	my clickInstallButton(settingsApp)
 	my enterAdminPassword(adminPass)
