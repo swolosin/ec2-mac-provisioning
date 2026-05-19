@@ -176,13 +176,18 @@ end buildEnrollmentProfile
 on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
 	my logMsg("Tahoe: opening enrollment profile...")
 	do shell script "open /tmp/enrollmentProfile.mobileconfig"
+	delay 2
 
-	-- Wait for the "Profile Downloaded" dialog to auto-dismiss (~10s)
-	my logMsg("Tahoe: waiting for Profile Downloaded dialog to auto-dismiss...")
-	delay 15
+	-- Click the blue button on the "Profile Downloaded" popup.
+	-- This navigates Settings directly to Device Management with the profile ready.
+	my logMsg("Tahoe: clicking blue button on Profile Downloaded popup...")
+	tell application settingsApp to activate
+	delay 0.5
+	tell application "System Events" to keystroke return
+	delay 2
 
-	-- Navigate directly to Device Management using native pane ID
-	my logMsg("Tahoe: navigating to Device Management...")
+	-- Navigate to Device Management as a safety net in case Return landed elsewhere
+	my logMsg("Tahoe: ensuring Device Management is open...")
 	tell application "System Settings"
 		reveal pane id "com.apple.Profiles-Settings.extension"
 		activate
