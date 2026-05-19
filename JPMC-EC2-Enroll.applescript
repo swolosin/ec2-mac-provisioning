@@ -226,12 +226,14 @@ on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
 	end repeat
 
 	if not profileFound then
-		my logMsg("ERROR: Tahoe: MDM Profile row not found in Device Management")
+		my logMsg("ERROR: Tahoe: no profile rows found in Device Management outline")
 		error "Tahoe: MDM Profile not found"
 	end if
-	my logMsg("Tahoe: MDM Profile found — selecting and opening...")
 
-	-- Select row then double-click to open the install sheet
+	-- Find the profile row by name, fall back to first available row
+	set targetRow to missing value
+	set targetIdx to missing value
+	set foundByName to false
 	tell application "System Events" to tell process settingsApp
 		tell group 1 of window 1
 			tell splitter group 1
@@ -241,11 +243,65 @@ on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
 							tell group 2
 								tell scroll area 1
 									tell outline 1
-										select row 2
+										set rowCount to count of rows
+										repeat with r from 1 to rowCount
+											try
+												if (value of static text 1 of UI element 1 of row r) contains "MDM Profile" then
+													set targetRow to row r
+													set targetIdx to r
+													set foundByName to true
+													exit repeat
+												end if
+											end try
+											try
+												if (title of row r) contains "MDM Profile" then
+													set targetRow to row r
+													set targetIdx to r
+													set foundByName to true
+													exit repeat
+												end if
+											end try
+										end repeat
+										if targetRow is missing value then
+											set targetRow to row 1
+											set targetIdx to 1
+										end if
+									end tell
+								end tell
+							end tell
+						end tell
+					end tell
+				end tell
+			end tell
+		end tell
+	end tell
+
+	if targetRow is missing value then
+		my logMsg("ERROR: Tahoe: could not identify profile row")
+		error "Tahoe: profile row not found"
+	end if
+
+	if foundByName then
+		my logMsg("Tahoe: MDM Profile found by name at row " & targetIdx & " — selecting and opening...")
+	else
+		my logMsg("Tahoe: WARNING: MDM Profile not found by name — falling back to row " & targetIdx)
+	end if
+
+	-- Select then double-click to open the install sheet
+	tell application "System Events" to tell process settingsApp
+		tell group 1 of window 1
+			tell splitter group 1
+				tell group 3
+					tell group 1
+						tell scroll area 1
+							tell group 2
+								tell scroll area 1
+									tell outline 1
+										select targetRow
 										delay 0.5
-										click row 2
+										click targetRow
 										delay 0.3
-										click row 2
+										click targetRow
 									end tell
 								end tell
 							end tell
