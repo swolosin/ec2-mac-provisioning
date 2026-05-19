@@ -206,30 +206,22 @@ end installSheetReady
 -- ============================================================
 
 on clickRowWithFallback(targetRow, settingsApp)
-	set cliclickPath to "/Users/Shared/._jpmc-tools/cliclick"
-
-	-- Attempt 1: Native AppleScript
-	my logMsg("Row click attempt 1: native AppleScript select + double-click...")
-	try
-		tell application "System Events" to tell process settingsApp
-			select targetRow
-			delay 0.3
-			click targetRow
-			delay 0.2
-			click targetRow
-		end tell
-	on error errMsg
-		my logMsg("Native click error: " & errMsg)
-	end try
-	delay 0.5
-
-	if my installSheetReady(settingsApp) then
-		my logMsg("Row click result: native AppleScript succeeded")
-		return
+	-- Resolve cliclick path
+	set cliclick to ""
+	repeat with p in {"/Users/Shared/._jpmc-tools/cliclick", "/opt/homebrew/bin/cliclick", "/usr/local/bin/cliclick"}
+		try
+			do shell script p & " -V 2>/dev/null"
+			set cliclick to p
+			exit repeat
+		end try
+	end repeat
+	if cliclick is "" then
+		my logMsg("ERROR: cliclick not found on any known path — cannot click profile row")
+		error "cliclick not available"
 	end if
-	my logMsg("Native AppleScript did not open install sheet — trying coordinate-based...")
+	my logMsg("Using cliclick at: " & cliclick)
 
-	-- Get row coordinates for fallback methods
+	-- Get row coordinates
 	set clickX to 0
 	set clickY to 0
 	try
@@ -241,66 +233,36 @@ on clickRowWithFallback(targetRow, settingsApp)
 		end tell
 		my logMsg("Row coordinates: (" & clickX & ", " & clickY & ")")
 	on error errMsg
-		my logMsg("WARNING: could not get row coordinates: " & errMsg)
+		my logMsg("ERROR: could not get row coordinates: " & errMsg)
+		error "Cannot click profile row without coordinates"
 	end try
 
-	if clickX > 0 then
-		-- Activate Settings before coordinate-based clicks (matches AWS approach)
+	-- Retry loop — cliclick dc:x,y with up to 5 attempts
+	set maxAttempts to 5
+	repeat with attempt from 1 to maxAttempts
+		my logMsg("Row click attempt " & attempt & "/" & maxAttempts & ": cliclick dc:(" & clickX & "," & clickY & ")...")
 		tell application settingsApp to activate
 		delay 1
-
-		-- Attempt 2: Python/Quartz CGEvent
-		my logMsg("Row click attempt 2: Python/Quartz at (" & clickX & ", " & clickY & ")...")
 		try
-			do shell script "python3 -c \"
-import Quartz, time
-p = (" & clickX & ", " & clickY & ")
-for t in [Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp, Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp]:
-    e = Quartz.CGEventCreateMouseEvent(None, t, p, Quartz.kCGMouseButtonLeft)
-    Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)
-    time.sleep(0.1)
-\""
-			my logMsg("Python/Quartz double-click sent")
+			do shell script cliclick & " dc:" & clickX & "," & clickY
+			my logMsg("cliclick dc executed")
 		on error errMsg
-			my logMsg("Python/Quartz error: " & errMsg)
+			my logMsg("cliclick error on attempt " & attempt & ": " & errMsg)
 		end try
 		delay 0.5
 
 		if my installSheetReady(settingsApp) then
-			my logMsg("Row click result: Python/Quartz succeeded")
-			return
-		end if
-		my logMsg("Python/Quartz did not open install sheet — trying cliclick...")
-
-		-- Attempt 3: cliclick (matches AWS: dc:x,y at center of profile cell)
-		my logMsg("Row click attempt 3: cliclick dc at (" & clickX & ", " & clickY & ")...")
-		tell application settingsApp to activate
-		delay 1
-		try
-			do shell script cliclickPath & " dc:" & clickX & "," & clickY
-			my logMsg("cliclick dc: executed from " & cliclickPath)
-		on error
-			try
-				do shell script "/opt/homebrew/bin/cliclick dc:" & clickX & "," & clickY
-				my logMsg("cliclick dc: executed from /opt/homebrew/bin/")
-			on error
-				try
-					do shell script "/usr/local/bin/cliclick dc:" & clickX & "," & clickY
-					my logMsg("cliclick dc: executed from /usr/local/bin/")
-				on error errMsg
-					my logMsg("ERROR: cliclick failed on all paths: " & errMsg)
-				end try
-			end try
-		end try
-		delay 0.5
-
-		if my installSheetReady(settingsApp) then
-			my logMsg("Row click result: cliclick succeeded")
+			my logMsg("Row click succeeded on attempt " & attempt)
 			return
 		end if
 
-		my logMsg("WARNING: all click methods attempted — proceeding to Install button step")
-	end if
+		if attempt < maxAttempts then
+			my logMsg("Install sheet not detected — retrying in 1 second...")
+			delay 1
+		end if
+	end repeat
+
+	my logMsg("WARNING: install sheet not confirmed after " & maxAttempts & " attempts — proceeding anyway")
 end clickRowWithFallback
 
 -- ============================================================
