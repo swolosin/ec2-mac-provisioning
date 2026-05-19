@@ -699,6 +699,28 @@ on installLaunchAgent(localAdmin, adminPass)
 end installLaunchAgent
 
 -- ============================================================
+-- FINAL STATUS LOGGER
+-- Writes a machine-readable JSON status line to the log.
+-- Downstream systems grep for ENROLLMENT_STATUS: and parse
+-- the JSON to decide whether to keep or terminate the instance.
+-- action: "none" = success, "terminate_and_rebuild" = failure
+-- ============================================================
+
+on logFinalStatus(statusResult, instanceRegion, jamfURL, failReason)
+	set awsPath to "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+	set instanceID to "unknown"
+	try
+		set token to (do shell script "PATH=" & awsPath & " ; curl -sf --connect-timeout 5 --max-time 10 -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300'")
+		set instanceID to (do shell script "PATH=" & awsPath & " ; curl -sf --connect-timeout 5 --max-time 10 -H 'X-aws-ec2-metadata-token: " & token & "' 'http://169.254.169.254/latest/meta-data/instance-id'")
+	end try
+	if statusResult is "SUCCESS" then
+		my logMsg("ENROLLMENT_STATUS: {\"status\":\"SUCCESS\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"mdm\":\"" & jamfURL & "\",\"action\":\"none\"}")
+	else
+		my logMsg("ENROLLMENT_STATUS: {\"status\":\"FAILED\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"reason\":\"" & failReason & "\",\"action\":\"terminate_and_rebuild\"}")
+	end if
+end logFinalStatus
+
+-- ============================================================
 -- MAIN
 -- ============================================================
 
@@ -800,6 +822,7 @@ on run argv
 
 	if enrolled then
 		my logMsg("=== JPMC-EC2-Enroll: SUCCESS ===")
+		my logFinalStatus("SUCCESS", instanceRegion, jamfURL, "")
 
 		-- Enable screen sharing so the instance is accessible via VNC after enrollment
 		my logMsg("Enabling screen sharing...")
@@ -814,5 +837,6 @@ on run argv
 		if doProdCleanup then my runCleanup(localAdmin, adminPass)
 	else
 		my logMsg("=== JPMC-EC2-Enroll: FAILED — enrollment did not complete. Check /Library/Logs/JPMC/EC2-Enroll.log and Jamf Pro ===")
+		my logFinalStatus("FAILED", instanceRegion, jamfURL, "enrollment did not complete within 5 minutes")
 	end if
 end run
