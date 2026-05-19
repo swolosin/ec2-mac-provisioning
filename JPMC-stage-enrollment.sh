@@ -174,7 +174,7 @@ echo "Compiling to .scpt..."
 
 echo "Installing to /Users/Shared/..."
 /usr/bin/sudo /bin/cp /tmp/JPMC-EC2-Enroll.scpt "$ENROLL_SCRIPT"
-/usr/bin/sudo /usr/sbin/chown root:wheel "$ENROLL_SCRIPT"
+/usr/bin/sudo /usr/sbin/chown ec2-user:wheel "$ENROLL_SCRIPT"
 /usr/bin/sudo /bin/chmod 644 "$ENROLL_SCRIPT"
 
 echo "Installed: $ENROLL_SCRIPT ($(/usr/bin/wc -c < "$ENROLL_SCRIPT" | /usr/bin/tr -d ' ') bytes)"
