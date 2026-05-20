@@ -268,9 +268,13 @@ Downstream AWS systems (Lambda, Step Functions, CloudWatch Logs Insights) can gr
 
 ## Troubleshooting
 
+### Automatic retry — ThrottleInterval
+
+The LaunchAgent is configured with `ThrottleInterval = 300`. If the enrollment script exits with an error (e.g. IMDS not ready at boot), launchd automatically retries it every 5 minutes until it succeeds. You will see multiple `=== JPMC-EC2-Enroll started ===` entries in the log — this is expected behavior, not a problem. Once enrollment succeeds and prodFlag=1 cleanup runs, the LaunchAgent removes itself and retries stop.
+
 ### Force-retrigger enrollment
 
-If the LaunchAgent didn't fire or you need to retry:
+If the LaunchAgent didn't fire or you need to retry manually:
 
 ```bash
 sudo chmod 777 /Library/Logs/JPMC
