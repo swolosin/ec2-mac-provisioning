@@ -682,6 +682,8 @@ on installLaunchAgent(localAdmin, adminPass)
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
+	<key>ThrottleInterval</key>
+	<integer>300</integer>
 	<key>StandardErrorPath</key>
 	<string>/Library/Logs/JPMC/EC2-Enroll.log</string>
 	<key>StandardOutPath</key>

@@ -34,7 +34,7 @@ set -euo pipefail
 # working end-to-end. Leave "0" during testing.
 # =====================================================
 readonly SECRET_ID="mdmSecret"
-readonly PROD_FLAG="0"
+readonly PROD_FLAG="1"
 
 # =====================================================
 # SOURCE URLS
