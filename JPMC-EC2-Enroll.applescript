@@ -166,37 +166,6 @@ on buildEnrollmentProfile(invitationID, jamfURL)
 end buildEnrollmentProfile
 
 -- ============================================================
--- INSTALL SHEET READY CHECK
--- Checks whether the profile install button has appeared after
--- clicking the profile row.
--- ============================================================
-
-on installSheetReady(settingsApp)
-	repeat 5 times
-		try
-			tell application "System Events" to tell process settingsApp
-				get button 1 of group 1 of sheet 1 of window 1
-				return true
-			end tell
-		end try
-		try
-			tell application "System Events" to tell process settingsApp
-				get button "Install" of sheet 1 of window 1
-				return true
-			end tell
-		end try
-		try
-			tell application "System Events" to tell process settingsApp
-				get button "Install…" of scroll area 1 of window 1
-				return true
-			end tell
-		end try
-		delay 0.3
-	end repeat
-	return false
-end installSheetReady
-
--- ============================================================
 -- CLICK ROW WITH FALLBACK
 -- Three-layer approach for 100% reliability:
 -- 1. Native AppleScript select + double-click
@@ -237,32 +206,15 @@ on clickRowWithFallback(targetRow, settingsApp)
 		error "Cannot click profile row without coordinates"
 	end try
 
-	-- Retry loop — cliclick dc:x,y with up to 5 attempts
-	set maxAttempts to 5
-	repeat with attempt from 1 to maxAttempts
-		my logMsg("Row click attempt " & attempt & "/" & maxAttempts & ": cliclick dc:(" & clickX & "," & clickY & ")...")
-		tell application settingsApp to activate
-		delay 1
-		try
-			do shell script cliclick & " dc:" & clickX & "," & clickY
-			my logMsg("cliclick dc executed")
-		on error errMsg
-			my logMsg("cliclick error on attempt " & attempt & ": " & errMsg)
-		end try
-		delay 0.5
-
-		if my installSheetReady(settingsApp) then
-			my logMsg("Row click succeeded on attempt " & attempt)
-			return
-		end if
-
-		if attempt < maxAttempts then
-			my logMsg("Install sheet not detected — retrying in 1 second...")
-			delay 1
-		end if
-	end repeat
-
-	my logMsg("WARNING: install sheet not confirmed after " & maxAttempts & " attempts — proceeding anyway")
+	-- Single surgical cliclick dc: — click once and hand off to clickInstallButton.
+	-- clickInstallButton loops until the Install button appears and clicks it,
+	-- matching AWS's approach. If the whole flow fails, ThrottleInterval retries.
+	my logMsg("Row click: cliclick dc:(" & clickX & "," & clickY & ")...")
+	tell application settingsApp to activate
+	delay 1
+	do shell script cliclick & " dc:" & clickX & "," & clickY
+	delay 0.2
+	my logMsg("cliclick dc executed")
 end clickRowWithFallback
 
 -- ============================================================
