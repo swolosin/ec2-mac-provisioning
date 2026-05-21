@@ -1,4 +1,16 @@
 #!/bin/zsh
+# ============================================================
+# Author:  Stephen Wolosin
+# Team:
+# Date:    2026-05-21
+#
+# WARNING: Test thoroughly in non-production environments before
+# deploying to production. This script modifies TCC databases,
+# installs LaunchAgents, and configures ec2-macos-init on EC2 Mac
+# instances. Misconfiguration may result in failed enrollment or
+# broken instance state. The author and team assume no liability
+# for damages arising from use outside of validated test environments.
+# ============================================================
 #
 # JPMC-stage-enrollment.sh
 #

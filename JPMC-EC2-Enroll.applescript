@@ -1,3 +1,16 @@
+-- ============================================================
+-- Author:  Stephen Wolosin
+-- Team:
+-- Date:    2026-05-21
+--
+-- WARNING: Test thoroughly in non-production environments before
+-- deploying to production. This script drives System Settings UI
+-- headlessly and interacts with MDM enrollment APIs. Misconfiguration
+-- may result in failed enrollment, locked devices, or unintended
+-- Jamf record changes. The author and team assume no liability for
+-- damages arising from use outside of validated test environments.
+-- ============================================================
+
 -- JPMC-EC2-Enroll.applescript
 -- Headless Jamf MDM enrollment for EC2 Mac instances
 -- Supports: macOS 14 (Sonoma), 15 (Sequoia), 26 (Tahoe)

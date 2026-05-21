@@ -1,4 +1,17 @@
 #!/bin/zsh
+# ============================================================
+# Author:  Stephen Wolosin
+# Team:
+# Date:    2026-05-21
+#
+# WARNING: Test thoroughly in non-production environments before
+# deploying to production. This script modifies local user accounts,
+# Secure Token, auto-login, and screen saver settings on EC2 Mac
+# instances. Misconfiguration may result in inaccessible instances
+# or failed downstream enrollment. The author and team assume no
+# liability for damages arising from use outside of validated test
+# environments.
+# ============================================================
 #
 # JPMC-setup-user.sh
 #
