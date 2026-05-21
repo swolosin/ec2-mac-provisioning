@@ -294,16 +294,41 @@ echo ""
 
 # =====================================================
 # Phase 6: Install LaunchAgent
-# JPMC-EC2-Enroll.scpt handles LaunchAgent installation
-# via its --launchagent flag, writing the plist directly.
+# Write the plist directly with sudo tee — no osascript,
+# no aws CLI, no credential dependency from SSM context.
 # =====================================================
 
 echo "=== Phase 6: Install LaunchAgent ==="
 
-/usr/bin/env PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-  /usr/bin/osascript "$ENROLL_SCRIPT" --launchagent --no-first-run
+/usr/bin/sudo /usr/bin/tee "$LAUNCHAGENT_PLIST" > /dev/null <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>KeepAlive</key>
+	<false/>
+	<key>Label</key>
+	<string>com.jpmc.ec2.mdm.enrollment</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/osascript</string>
+		<string>/Users/Shared/JPMC-EC2-Enroll.scpt</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>300</integer>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/JPMC/EC2-Enroll.log</string>
+	<key>StandardOutPath</key>
+	<string>/Library/Logs/JPMC/EC2-Enroll-out.log</string>
+</dict>
+</plist>
+PLIST
 
-/bin/sleep 5
+/usr/bin/sudo /usr/sbin/chown root:wheel "$LAUNCHAGENT_PLIST"
+/usr/bin/sudo /bin/chmod 644 "$LAUNCHAGENT_PLIST"
+
 [[ -f "$LAUNCHAGENT_PLIST" ]] || { echo "ERROR: LaunchAgent plist not written" >&2; exit 1; }
 echo "LaunchAgent installed."
 
