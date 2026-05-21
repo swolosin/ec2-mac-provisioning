@@ -13,9 +13,6 @@
 --   defaults write com.jpmc.ec2.mdm.enrollment MMSecret "your-secret-id"
 --   defaults write com.jpmc.ec2.mdm.enrollment prodFlag "1"
 --
--- Used by stage-enrollment.sh:
---   osascript JPMC-EC2-Enroll.scpt --launchagent --no-first-run
---
 -- Invoked at boot by LaunchAgent (no argv):
 --   osascript /Users/Shared/JPMC-EC2-Enroll.scpt
 
@@ -610,47 +607,7 @@ on runCleanup(localAdmin, adminPass)
 	my logMsg("Cleanup complete.")
 end runCleanup
 
--- ============================================================
--- LAUNCHAGENT INSTALLER
--- Called by stage-enrollment.sh via --launchagent --no-first-run.
--- Writes the plist directly without the firstrun dialog flow.
--- Log directory /Library/Logs/JPMC/ is created by stage-enrollment.sh.
--- ============================================================
 
-on installLaunchAgent(localAdmin, adminPass)
-	set scriptPath to "/Users/Shared/JPMC-EC2-Enroll.scpt"
-	set plistXML to "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
-<dict>
-	<key>KeepAlive</key>
-	<false/>
-	<key>Label</key>
-	<string>com.jpmc.ec2.mdm.enrollment</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>/usr/bin/osascript</string>
-		<string>" & scriptPath & "</string>
-	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>ThrottleInterval</key>
-	<integer>300</integer>
-	<key>StandardErrorPath</key>
-	<string>/Library/Logs/JPMC/EC2-Enroll.log</string>
-	<key>StandardOutPath</key>
-	<string>/Library/Logs/JPMC/EC2-Enroll-out.log</string>
-</dict>
-</plist>"
-
-	try
-		do shell script "launchctl unload -w /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist 2>/dev/null; true" user name localAdmin password adminPass with administrator privileges
-	end try
-	do shell script "echo " & quoted form of plistXML & " > /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist" user name localAdmin password adminPass with administrator privileges
-	do shell script "chown root:wheel /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist" user name localAdmin password adminPass with administrator privileges
-
-	my logMsg("JPMC-EC2-Enroll LaunchAgent installed.")
-end installLaunchAgent
 
 -- ============================================================
 -- FINAL STATUS LOGGER
@@ -687,19 +644,6 @@ on run argv
 	if macMajor < 13 then set settingsApp to "System Preferences"
 
 	my logMsg("=== JPMC-EC2-Enroll started | macOS " & macMajor & " ===")
-
-	-- LaunchAgent installation mode (stage-enrollment.sh passes --launchagent --no-first-run)
-	if argv contains "--launchagent" then
-		my logMsg("Mode: LaunchAgent install")
-		set secretID to my getMMSecret()
-		my logMsg("Secret ID: " & secretID)
-		set region to my imdsGet("placement/region")
-		set localAdmin to my getSecret(region, secretID, "localAdmin")
-		set adminPass to my getSecret(region, secretID, "localAdminPassword")
-		my installLaunchAgent(localAdmin, adminPass)
-		my logMsg("=== LaunchAgent install complete ===")
-		return
-	end if
 
 	-- Enrollment mode (LaunchAgent fires at boot with no argv)
 	my logMsg("Mode: enrollment")
