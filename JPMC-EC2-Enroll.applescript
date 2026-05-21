@@ -603,7 +603,7 @@ on runCleanup(localAdmin, adminPass)
 		my logMsg("Cleanup: JPMC-EC2-Enroll.scpt removed")
 	end try
 	try
-		do shell script "launchctl unload -w /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist" user name localAdmin password adminPass with administrator privileges
+		do shell script "launchctl unload -w /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist; rm -f /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist" user name localAdmin password adminPass with administrator privileges
 		my logMsg("Cleanup: LaunchAgent unloaded and removed")
 	end try
 
