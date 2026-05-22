@@ -384,7 +384,7 @@ on installProfile_Ventura(adminPass, localAdmin, settingsApp, macMajor)
 	do shell script "open /System/Library/PreferencePanes/Profiles.prefPane"
 	delay 2
 
-	-- macOS 14: navigate sidebar to "Profile" entry
+	-- macOS 14: click sidebar Profile entry to navigate
 	if macMajor is 14 then
 		my logMsg("Sonoma: navigating sidebar for Profile entry...")
 		tell application "System Events" to tell process settingsApp
@@ -398,6 +398,40 @@ on installProfile_Ventura(adminPass, localAdmin, settingsApp, macMajor)
 				end try
 			end repeat
 		end tell
+	end if
+
+	-- macOS 15 Sequoia: cliclick the sidebar "Profiles" entry.
+	-- This brings Settings to the foreground which dismisses the "Profile Downloaded"
+	-- popup that is still floating from the mobileconfig open above.
+	-- Without this, the popup intercepts the profile row cliclick below.
+	if macMajor >= 15 then
+		my logMsg("Sequoia: clicking sidebar Profiles entry to dismiss popup and focus Settings...")
+		set sidebarTarget to missing value
+		delay 2
+		repeat with sidebarIdx from 2 to 8
+			try
+				tell application "System Events" to tell process settingsApp
+					if (get value of static text 1 of UI element 1 of row sidebarIdx of outline 1 of scroll area 1 of group 1 of splitter group 1 of group 1 of window 1) contains "Profile" then
+						set sidebarTarget to (UI element 1 of row sidebarIdx of outline 1 of scroll area 1 of group 1 of splitter group 1 of group 1 of window 1)
+						exit repeat
+					end if
+				end tell
+			end try
+		end repeat
+		if sidebarTarget is not missing value then
+			tell application "System Events" to tell process settingsApp to tell sidebarTarget
+				set {xPos, yPos} to position
+				set {xSz, ySz} to size
+			end tell
+			delay 0.5
+			try
+				do shell script "/Users/Shared/._jpmc-tools/cliclick dc:" & (xPos + (xSz div 2)) & "," & (yPos + (ySz div 2))
+				my logMsg("Sequoia: sidebar Profiles entry clicked")
+			end try
+			delay 1
+		else
+			my logMsg("Sequoia: sidebar Profiles entry not found — continuing without sidebar click")
+		end if
 	end if
 
 	-- Wait for profile cell to appear
