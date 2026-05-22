@@ -637,11 +637,20 @@ on logFinalStatus(statusResult, instanceRegion, jamfURL, failReason)
 		set token to (do shell script "PATH=" & awsPath & " ; curl -sf --connect-timeout 5 --max-time 10 -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300'")
 		set instanceID to (do shell script "PATH=" & awsPath & " ; curl -sf --connect-timeout 5 --max-time 10 -H 'X-aws-ec2-metadata-token: " & token & "' 'http://169.254.169.254/latest/meta-data/instance-id'")
 	end try
+	set statusJSON to ""
 	if statusResult is "SUCCESS" then
-		my logMsg("ENROLLMENT_STATUS: {\"status\":\"SUCCESS\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"mdm\":\"" & jamfURL & "\",\"action\":\"none\"}")
+		set statusJSON to "{\"status\":\"SUCCESS\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"mdm\":\"" & jamfURL & "\",\"action\":\"none\"}"
+		my logMsg("ENROLLMENT_STATUS: " & statusJSON)
 	else
-		my logMsg("ENROLLMENT_STATUS: {\"status\":\"FAILED\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"reason\":\"" & failReason & "\",\"action\":\"terminate_and_rebuild\"}")
+		set statusJSON to "{\"status\":\"FAILED\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"reason\":\"" & failReason & "\",\"action\":\"terminate_and_rebuild\"}"
+		my logMsg("ENROLLMENT_STATUS: " & statusJSON)
 	end if
+	-- Upload status directly to S3 so test pipeline can detect completion without SSM polling
+	try
+		do shell script "PATH=" & awsPath & " ; echo " & quoted form of statusJSON & " | aws s3 cp - s3://jpmc-ec2-enrollment-test-logs/enrollment-status/" & instanceID & ".json --region " & instanceRegion
+	on error errMsg
+		my logMsg("WARNING: S3 status upload failed: " & errMsg)
+	end try
 end logFinalStatus
 
 -- ============================================================
