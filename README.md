@@ -75,7 +75,7 @@ Instance launched from AMI
   • Creates enrollment invitation via Jamf API
   • Builds .mobileconfig profile
   • Opens profile → presses Return on "Profile Downloaded" popup
-  • Navigates to Device Management via URL scheme + reveal pane id
+  • Navigates to Device Management via URL scheme (works on all macOS versions)
   • Finds MDM Profile row by name, double-clicks with cliclick
   • Clicks Install → enters admin password into SecurityAgent
   • Polls for enrollment confirmation (up to 5 minutes)
@@ -174,7 +174,7 @@ Every log entry is timestamped:
 ```
 2026-05-21 03:30:44  === JPMC-EC2-Enroll started | macOS 26 ===
 2026-05-21 03:30:46  IMDS ok (attempt 4/12): placement/region = us-east-2
-2026-05-21 03:31:00  Tahoe: MDM Profile found by name at row 2
+2026-05-21 03:31:00  MDM Profile found — opening install sheet...
 2026-05-21 03:31:13  MDM enrollment confirmed via CLI (poll 2)
 2026-05-21 03:31:13  === JPMC-EC2-Enroll: SUCCESS ===
 2026-05-21 03:31:13  ENROLLMENT_STATUS: {"status":"SUCCESS",...}
@@ -270,7 +270,7 @@ When `PROD_FLAG="1"` is set in the stage script, after successful enrollment the
 |---|---|---|
 | Boot-time IMDS failure (exit code 7) | No retry — fails silently | 12 retries with 10s intervals + ThrottleInterval auto-retry |
 | macOS 26 Tahoe navigation | Crashes (`sidebarTarget` undefined) | URL scheme direct to Device Management |
-| macOS 14/15 support | Limited | Full support via installProfile_Ventura path |
+| macOS 14/15 support | Limited | Full support — unified installation flow across all versions |
 | Log persistence | `/tmp/` — wiped on reboot | `/Library/Logs/JPMC/` — persists |
 | Log readability | No timestamps | Timestamped every line |
 | cliclick reliability | Single attempt | Single surgical cliclick matching AWS approach |
