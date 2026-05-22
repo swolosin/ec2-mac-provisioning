@@ -2,7 +2,9 @@
 
 Fully headless, automated Jamf MDM enrollment for EC2 Mac instances. Instances launched from the AMI enroll automatically at first GUI login with no human interaction required.
 
-> **Origin:** This workflow was inspired by and built upon the AWS sample script `enroll-ec2-mac.scpt` (see `EC2_AWS_Build/`). The JPMC implementation rewrites the enrollment logic with IMDS retry, macOS 26 Tahoe support, persistent logging, cliclick fallback with retry, and machine-readable status output for downstream AWS automation.
+Supports **macOS 14 (Sonoma)**, **macOS 15 (Sequoia)**, and **macOS 26 (Tahoe)**.
+
+> **Origin:** This workflow was inspired by and built upon the AWS sample script `enroll-ec2-mac.scpt` (see `EC2_AWS_Build/`). The JPMC implementation rewrites the enrollment logic with IMDS retry, multi-version macOS support, persistent logging, cliclick fallback, S3 status reporting, and machine-readable status output for downstream AWS automation.
 
 ---
 
@@ -10,8 +12,8 @@ Fully headless, automated Jamf MDM enrollment for EC2 Mac instances. Instances l
 
 ```
 /
-├── JPMC-setup-user.sh           # Step 1 — run via SSH on new instance
-├── JPMC-stage-enrollment.sh     # Step 3 — run via SSH after SIP disable
+├── JPMC-setup-user.sh           # Step 1 — run via SSM on new instance
+├── JPMC-stage-enrollment.sh     # Step 3 — run via SSM after SIP disable
 ├── JPMC-EC2-Enroll.applescript  # Compiled and installed by stage script
 └── EC2_AWS_Build/               # Original AWS scripts (reference only)
 ```
@@ -26,7 +28,7 @@ Fully headless, automated Jamf MDM enrollment for EC2 Mac instances. Instances l
 New EC2 Mac Instance
         │
         ▼
-JPMC-setup-user.sh (SSH)
+JPMC-setup-user.sh
   • Retrieves credentials from Secrets Manager
   • Sets ec2-user password + Secure Token
   • Configures auto-login
@@ -34,16 +36,16 @@ JPMC-setup-user.sh (SSH)
   • Creates /private/var/db/locationd (required by Jamf binary)
         │
         ▼
-disable-sip.sh (CloudShell) ──── AWS API ────► Instance reboots (~2.5 hrs)
+AWS SIP Disable API ──── AWS API ────► Instance reboots (~2.5 hrs)
         │
         ▼
-JPMC-stage-enrollment.sh (SSH)
+JPMC-stage-enrollment.sh
   • Creates /Library/Logs/JPMC/ (persistent log directory)
   • Injects TCC permissions (Accessibility + AppleEvents) into SQLite
   • Installs cliclick via Homebrew, caches to /Users/Shared/._jpmc-tools/
   • Downloads JPMC-EC2-Enroll.applescript from GitHub, compiles to .scpt
   • Writes MMSecret + prodFlag to defaults
-  • Installs LaunchAgent (com.jpmc.ec2.mdm.enrollment)
+  • Writes LaunchAgent plist directly to /Library/LaunchAgents/
   • Disables RandomizePassword in ec2-macos-init
   • Clears ec2-macos-init instance history
         │
@@ -67,18 +69,19 @@ Instance launched from AMI
         ▼
   JPMC-EC2-Enroll.scpt
   • Reads MMSecret from defaults
-  • Gets region from IMDS (6 retries, fixes boot-time timing failure)
+  • Gets region from IMDS (12 retries / 10s intervals — handles boot-time delays)
   • Retrieves all credentials from Secrets Manager
   • Authenticates with Jamf Pro (OAuth, falls back to Basic)
   • Creates enrollment invitation via Jamf API
   • Builds .mobileconfig profile
   • Opens profile → presses Return on "Profile Downloaded" popup
   • Navigates to Device Management via URL scheme + reveal pane id
-  • Finds MDM Profile row by name, double-clicks with cliclick (5 retries)
+  • Finds MDM Profile row by name, double-clicks with cliclick
   • Clicks Install → enters admin password into SecurityAgent
   • Polls for enrollment confirmation (up to 5 minutes)
   • Enables screen sharing
   • Writes ENROLLMENT_STATUS JSON to log
+  • Uploads enrollment status directly to S3
   • Runs cleanup if prodFlag = 1
         │
         ▼
@@ -98,85 +101,9 @@ Instance launched from AMI
 | `localAdmin` | `ec2-user` |
 | `localAdminPassword` | Strong random password |
 
-**IAM instance profile** with `secretsmanager:GetSecretValue` on the `mdmSecret` ARN.
+**IAM instance profile** with `secretsmanager:GetSecretValue` on the `mdmSecret` ARN and `s3:PutObject` on the enrollment logs bucket.
 
 **EC2 Mac dedicated host** (minimum 24-hour allocation, mac2.metal recommended).
-
----
-
-## Order of Operations
-
-### Step 1 — Launch the staging instance
-
-In the EC2 Launch Wizard:
-- Choose a vanilla AWS macOS AMI
-- Attach the IAM instance profile
-- **Leave User Data blank**
-- Set Metadata version to `V2 only (token required)`
-- Launch and wait for status checks (~6–20 min)
-
-### Step 2 — Run JPMC-setup-user.sh via SSH
-
-```bash
-scp -i key.pem JPMC-setup-user.sh ec2-user@<ip>:/tmp/
-ssh -i key.pem ec2-user@<ip>
-chmod +x /tmp/JPMC-setup-user.sh && /tmp/JPMC-setup-user.sh
-```
-
-**What it does:** Sets password, enables Secure Token (required for SIP disable API), configures auto-login, disables screen saver on both `-currentHost` and user domain, creates `/private/var/db/locationd`.
-
-**Verify success:**
-- `Secure token is ENABLED for user ec2-user`
-- `autoLoginUser: ec2-user`
-- `/etc/kcpassword: present`
-- `screensaver idleTime: 0` (both domains)
-
-### Step 3 — Disable SIP from CloudShell
-
-```bash
-chmod +x disable-sip.sh
-./EC2_AWS_Build/disable-sip.sh <instance-id>
-```
-
-Monitor status:
-```bash
-aws ec2 describe-mac-modification-tasks \
-  --mac-modification-task-ids <task-id> \
-  --region us-east-2 \
-  --query 'MacModificationTasks[0].TaskState' --output text
-```
-
-Plan for up to 2.5 hours. Instance reboots multiple times. When state shows `successful`, wait a few minutes before SSHing back in.
-
-### Step 4 — Run JPMC-stage-enrollment.sh via SSH
-
-```bash
-scp -i key.pem JPMC-stage-enrollment.sh ec2-user@<ip>:/tmp/
-ssh -i key.pem ec2-user@<ip>
-chmod +x /tmp/JPMC-stage-enrollment.sh && /tmp/JPMC-stage-enrollment.sh
-```
-
-**Preflight gate checks:**
-- `JPMC-EC2-Enroll.scpt: OK`
-- `MMSecret: OK`
-- `cliclick: OK`
-
-### Step 5 — Snapshot the AMI
-
-Create AMI in EC2 console with **No reboot** selected. Wait for:
-- AMI State: `available`
-- Snapshot Progress: `100%`
-
-```bash
-aws ec2 describe-images --owners self \
-  --query 'Images[*].{ID:ImageId,Name:Name,State:State}' --output table
-```
-
-### Step 6 — Launch test instance from AMI
-
-- Attach IAM instance profile
-- Wait for boot, auto-login fires, LaunchAgent runs
-- Enrollment completes automatically (~30–60 seconds after GUI login)
 
 ---
 
@@ -186,12 +113,12 @@ All environment-specific settings are at the top of `JPMC-stage-enrollment.sh`:
 
 ```bash
 readonly SECRET_ID="mdmSecret"      # AWS Secrets Manager secret name
-readonly PROD_FLAG="0"              # Set to "1" when ready for production cleanup
+readonly PROD_FLAG="1"              # Set to "1" for production cleanup
 readonly ENROLL_SOURCE_URL="..."    # URL to JPMC-EC2-Enroll.applescript
 readonly CLICLICK_SOURCE="brew"     # "brew" or direct URL for internal Artifactory/Bitbucket
 ```
 
-The AppleScript never needs to be modified per environment — it reads everything from defaults written by the stage script.
+The AppleScript never needs to be modified per environment — it reads everything from defaults written by the stage script. All credentials and URLs live in Secrets Manager. To rotate passwords or update the Jamf URL, update `mdmSecret` — no script changes needed.
 
 ---
 
@@ -245,13 +172,12 @@ All logs are written to `/Library/Logs/JPMC/` which persists across reboots and 
 
 Every log entry is timestamped:
 ```
-2026-05-19 17:52:28  === JPMC-EC2-Enroll started | macOS 26 ===
-2026-05-19 17:52:28  IMDS ok (attempt 1/6): placement/region = us-east-2
-2026-05-19 17:52:45  Tahoe: MDM Profile found by name at row 2
-2026-05-19 17:52:53  Row click succeeded on attempt 3
-2026-05-19 17:53:05  MDM enrollment confirmed via CLI (poll 2)
-2026-05-19 17:53:06  === JPMC-EC2-Enroll: SUCCESS ===
-2026-05-19 17:53:07  ENROLLMENT_STATUS: {"status":"SUCCESS",...}
+2026-05-21 03:30:44  === JPMC-EC2-Enroll started | macOS 26 ===
+2026-05-21 03:30:46  IMDS ok (attempt 4/12): placement/region = us-east-2
+2026-05-21 03:31:00  Tahoe: MDM Profile found by name at row 2
+2026-05-21 03:31:13  MDM enrollment confirmed via CLI (poll 2)
+2026-05-21 03:31:13  === JPMC-EC2-Enroll: SUCCESS ===
+2026-05-21 03:31:13  ENROLLMENT_STATUS: {"status":"SUCCESS",...}
 ```
 
 ### Machine-Readable Status Line
@@ -262,7 +188,7 @@ The final line of every enrollment run contains a parseable JSON status:
 ENROLLMENT_STATUS: {"status":"SUCCESS|FAILED","instance":"i-xxx","region":"us-east-2","mdm":"https://...","action":"none|terminate_and_rebuild"}
 ```
 
-Downstream AWS systems (Lambda, Step Functions, CloudWatch Logs Insights) can grep for `ENROLLMENT_STATUS:` and parse the `action` field to determine whether to keep or terminate and rebuild the instance.
+In addition to the log, enrollment status is uploaded directly to S3 (`enrollment-status/{instance_id}.json`) on completion. Downstream AWS systems can check S3 instead of parsing logs.
 
 ---
 
@@ -306,7 +232,7 @@ Finder → ⌘K → `vnc://localhost` — log in as `ec2-user`.
 |---|---|---|
 | `NoCredentials` in log | IAM instance profile not attached | EC2 console → Actions → Security → Modify IAM role |
 | `AccessDeniedException` | IAM policy missing or wrong secret ARN | Update IAM policy |
-| `IMDS unavailable after 6 attempts` | Network not ready at boot | LaunchAgent will not retry automatically — kickstart manually |
+| `IMDS unavailable after 12 attempts` | Network not ready at boot | LaunchAgent will retry automatically every 5 minutes |
 | `MDM Profile not found` | Profile popup not dismissed correctly | Check log for navigation step, kickstart to retry |
 | `cliclick failed on all paths` | cliclick binary missing from AMI | Re-stage — Phase 2 of stage script installs and caches it |
 
@@ -322,7 +248,7 @@ When `PROD_FLAG="1"` is set in the stage script, after successful enrollment the
 - `/tmp/enrollmentProfile.mobileconfig` deleted
 - `/Users/Shared/._jpmc-tools/` (cliclick cache) deleted
 - `/Users/Shared/JPMC-EC2-Enroll.scpt` deleted
-- LaunchAgent unloaded
+- LaunchAgent unloaded and plist deleted
 
 **Only the log files at `/Library/Logs/JPMC/` are retained.**
 
@@ -342,11 +268,12 @@ When `PROD_FLAG="1"` is set in the stage script, after successful enrollment the
 
 | Issue | AWS Script | JPMC Script |
 |---|---|---|
-| Boot-time IMDS failure (exit code 7) | No retry — fails silently | 6 retries with 5s intervals |
+| Boot-time IMDS failure (exit code 7) | No retry — fails silently | 12 retries with 10s intervals + ThrottleInterval auto-retry |
 | macOS 26 Tahoe navigation | Crashes (`sidebarTarget` undefined) | URL scheme direct to Device Management |
+| macOS 14/15 support | Limited | Full support via installProfile_Ventura path |
 | Log persistence | `/tmp/` — wiped on reboot | `/Library/Logs/JPMC/` — persists |
 | Log readability | No timestamps | Timestamped every line |
-| cliclick reliability | Single attempt | 5-attempt retry loop |
-| Machine-readable status | None | `ENROLLMENT_STATUS:` JSON line |
+| cliclick reliability | Single attempt | Single surgical cliclick matching AWS approach |
+| Machine-readable status | None | `ENROLLMENT_STATUS:` JSON line + S3 status file |
 | Secret name fallback | Falls back to `"jamfSecret"` | Falls back to `"mdmSecret"`, logs warning |
-| Post-enrollment cleanup | Removes cliclick via brew | Removes entire `._jpmc-tools/` cache + script |
+| Post-enrollment cleanup | Removes cliclick via brew | Removes entire `._jpmc-tools/` cache + script + LaunchAgent plist |
