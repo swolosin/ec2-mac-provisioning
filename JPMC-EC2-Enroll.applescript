@@ -228,253 +228,69 @@ on clickRowWithFallback(targetRow, settingsApp)
 end clickRowWithFallback
 
 -- ============================================================
--- PROFILE INSTALLATION: macOS 26 TAHOE
--- 1. Open mobileconfig — "Profile Downloaded" popup appears with
---    a blue button. Press Return to click it, which navigates
---    Settings directly to Device Management.
--- 2. URL scheme + reveal pane id as safety net for navigation.
--- 3. Find MDM Profile row by name, cliclick dc:x,y with retries.
+-- PROFILE INSTALLATION — ALL macOS VERSIONS (14, 15, 26)
+-- Navigation is identical across all versions:
+--   1. keystroke return dismisses the "Profile Downloaded" popup
+--   2. URL scheme navigates directly to Device Management
+-- Profile row found via fallback chain covering all known UI paths.
 -- ============================================================
 
-on installProfile_Tahoe(adminPass, localAdmin, settingsApp)
-	my logMsg("Tahoe: opening enrollment profile...")
+on installProfile(adminPass, localAdmin, settingsApp, macMajor)
+	my logMsg("Opening enrollment profile...")
 	do shell script "open /tmp/enrollmentProfile.mobileconfig"
 	delay 2
 
-	-- Click the blue button on the "Profile Downloaded" popup.
-	-- This navigates Settings directly to Device Management with the profile ready.
-	my logMsg("Tahoe: clicking blue button on Profile Downloaded popup...")
+	-- Dismiss popup and navigate to Device Management
+	my logMsg("Dismissing popup and navigating to Device Management...")
 	tell application settingsApp to activate
 	delay 0.5
 	tell application "System Events" to keystroke return
 	delay 2
-
-	-- Navigate to Device Management as a safety net in case Return landed elsewhere.
-	-- URL scheme is confirmed solid. reveal pane id as secondary attempt.
-	my logMsg("Tahoe: ensuring Device Management is open...")
-	try
-		do shell script "open 'x-apple.systempreferences:com.apple.preferences.configurationprofiles'"
-	end try
-	try
-		tell application "System Settings"
-			reveal pane id "com.apple.Profiles-Settings.extension"
-			activate
-		end tell
-	end try
+	do shell script "open 'x-apple.systempreferences:com.apple.preferences.configurationprofiles'"
 	delay 2
 	tell application settingsApp to activate
 	delay 1
 
-	-- Wait for the MDM Profile row to appear in the outline
-	my logMsg("Tahoe: waiting for MDM Profile row...")
-	set profileFound to false
+	-- Find profile row — fallback chain covers macOS 14, 15, and 26
+	my logMsg("Waiting for MDM Profile row...")
+	set targetRow to missing value
 	repeat 20 times
 		try
+			-- Tahoe (macOS 26): outline in group 3
 			tell application "System Events" to tell process settingsApp
-				tell group 1 of window 1
-					tell splitter group 1
-						tell group 3
-							tell group 1
-								tell scroll area 1
-									tell group 2
-										tell scroll area 1
-											tell outline 1
-												if (count of rows) >= 2 then
-													set profileFound to true
-												end if
-											end tell
-										end tell
-									end tell
-								end tell
-							end tell
-						end tell
-					end tell
+				tell outline 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 3 of splitter group 1 of group 1 of window 1
+					if (count of rows) >= 2 then set targetRow to row 2
 				end tell
 			end tell
 		end try
-		if profileFound then exit repeat
-		delay 0.5
-	end repeat
-
-	if not profileFound then
-		my logMsg("ERROR: Tahoe: no profile rows found in Device Management outline")
-		error "Tahoe: MDM Profile not found"
-	end if
-
-	-- Find the profile row by name, fall back to first available row
-	set targetRow to missing value
-	set targetIdx to missing value
-	set foundByName to false
-	tell application "System Events" to tell process settingsApp
-		tell group 1 of window 1
-			tell splitter group 1
-				tell group 3
-					tell group 1
-						tell scroll area 1
-							tell group 2
-								tell scroll area 1
-									tell outline 1
-										set rowCount to count of rows
-										repeat with r from 1 to rowCount
-											try
-												if (value of static text 1 of UI element 1 of row r) contains "MDM Profile" then
-													set targetRow to row r
-													set targetIdx to r
-													set foundByName to true
-													exit repeat
-												end if
-											end try
-											try
-												if (title of row r) contains "MDM Profile" then
-													set targetRow to row r
-													set targetIdx to r
-													set foundByName to true
-													exit repeat
-												end if
-											end try
-										end repeat
-										if targetRow is missing value then
-											set targetRow to row 1
-											set targetIdx to 1
-										end if
-									end tell
-								end tell
-							end tell
-						end tell
-					end tell
-				end tell
-			end tell
-		end tell
-	end tell
-
-	if targetRow is missing value then
-		my logMsg("ERROR: Tahoe: could not identify profile row")
-		error "Tahoe: profile row not found"
-	end if
-
-	if foundByName then
-		my logMsg("Tahoe: MDM Profile found by name at row " & targetIdx & " — opening install sheet...")
-	else
-		my logMsg("Tahoe: WARNING: MDM Profile not found by name — falling back to row " & targetIdx)
-	end if
-
-	my clickRowWithFallback(targetRow, settingsApp)
-
-	my clickInstallButton(settingsApp)
-	my enterAdminPassword(adminPass)
-end installProfile_Tahoe
-
--- ============================================================
--- PROFILE INSTALLATION: macOS 14 (Sonoma) and 15 (Sequoia)
--- ============================================================
-
-on installProfile_Ventura(adminPass, localAdmin, settingsApp, macMajor)
-	my logMsg("Sonoma/Sequoia (macOS " & macMajor & "): opening enrollment profile...")
-	-- Open profile, quit Settings, reopen to Profiles pane cleanly
-	do shell script "open /tmp/enrollmentProfile.mobileconfig"
-	delay 1
-	try
-		tell application settingsApp to quit
-		delay 1
-	end try
-	try
-		do shell script "killall -m BluetoothSetupAssistant 2>/dev/null; true"
-	end try
-	my logMsg("Sonoma/Sequoia: opening Profiles prefPane...")
-	do shell script "open /System/Library/PreferencePanes/Profiles.prefPane"
-	delay 2
-
-	-- macOS 14: click sidebar Profile entry to navigate
-	if macMajor is 14 then
-		my logMsg("Sonoma: navigating sidebar for Profile entry...")
-		tell application "System Events" to tell process settingsApp
-			repeat with sidebarIdx from 2 to 8
-				try
-					if (value of static text 1 of UI element 1 of row sidebarIdx of outline 1 of scroll area 1 of group 1 of splitter group 1 of group 1 of window 1) contains "Profile" then
-						click (UI element 1 of row sidebarIdx of outline 1 of scroll area 1 of group 1 of splitter group 1 of group 1 of window 1)
-						delay 1
-						exit repeat
-					end if
-				end try
-			end repeat
-		end tell
-	end if
-
-	-- macOS 15 Sequoia: cliclick the sidebar "Profiles" entry.
-	-- This brings Settings to the foreground which dismisses the "Profile Downloaded"
-	-- popup that is still floating from the mobileconfig open above.
-	-- Without this, the popup intercepts the profile row cliclick below.
-	if macMajor >= 15 then
-		my logMsg("Sequoia: clicking sidebar Profiles entry to dismiss popup and focus Settings...")
-		set sidebarTarget to missing value
-		delay 2
-		repeat with sidebarIdx from 2 to 8
-			try
-				tell application "System Events" to tell process settingsApp
-					if (get value of static text 1 of UI element 1 of row sidebarIdx of outline 1 of scroll area 1 of group 1 of splitter group 1 of group 1 of window 1) contains "Profile" then
-						set sidebarTarget to (UI element 1 of row sidebarIdx of outline 1 of scroll area 1 of group 1 of splitter group 1 of group 1 of window 1)
-						exit repeat
-					end if
-				end tell
-			end try
-		end repeat
-		if sidebarTarget is not missing value then
-			tell application "System Events" to tell process settingsApp to tell sidebarTarget
-				set {xPos, yPos} to position
-				set {xSz, ySz} to size
-			end tell
-			delay 0.5
-			try
-				do shell script "/Users/Shared/._jpmc-tools/cliclick dc:" & (xPos + (xSz div 2)) & "," & (yPos + (ySz div 2))
-				my logMsg("Sequoia: sidebar Profiles entry clicked")
-			end try
-			delay 1
-		else
-			my logMsg("Sequoia: sidebar Profiles entry not found — continuing without sidebar click")
-		end if
-	end if
-
-	-- Wait for profile cell to appear
-	my logMsg("Sonoma/Sequoia: waiting for profile cell...")
-	set profileCell to missing value
-	repeat 30 times
 		try
-			-- Sequoia 15.2+ path
-			tell application "System Events" to tell process settingsApp
-				click button 1 of group 6 of scroll area 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
-			end tell
-			delay 0.5
-		end try
-		try
-			-- Sequoia 15.0 / 15.1 path
+			-- Sequoia 15.0/15.1: outline in group 2
 			tell application "System Events" to tell process settingsApp
 				get value of static text 1 of UI element 1 of row 2 of outline 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
-				set profileCell to row 2 of outline 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
-				exit repeat
+				set targetRow to row 2 of outline 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
 			end tell
 		end try
 		try
-			-- Sonoma / Sequoia table path
+			-- Sonoma / Sequoia: table path
 			tell application "System Events" to tell process settingsApp
 				get value of static text 1 of UI element 1 of row 2 of table 1 of scroll area 1 of group 1 of scroll area 1 of group 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
-				set profileCell to row 2 of table 1 of scroll area 1 of group 1 of scroll area 1 of group 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
-				exit repeat
+				set targetRow to row 2 of table 1 of scroll area 1 of group 1 of scroll area 1 of group 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
 			end tell
 		end try
+		if targetRow is not missing value then exit repeat
 		delay 0.5
 	end repeat
 
-	if profileCell is missing value then
-		my logMsg("ERROR: Sonoma/Sequoia: profile cell not found after 15 seconds")
-		error "Sonoma/Sequoia: profile cell not found"
+	if targetRow is missing value then
+		my logMsg("ERROR: MDM Profile row not found after 10 seconds")
+		error "MDM Profile row not found"
 	end if
-	my logMsg("Sonoma/Sequoia: profile cell found — opening install sheet...")
+	my logMsg("MDM Profile found — opening install sheet...")
 
-	my clickRowWithFallback(profileCell, settingsApp)
-
+	my clickRowWithFallback(targetRow, settingsApp)
 	my clickInstallButton(settingsApp)
 	my enterAdminPassword(adminPass)
-end installProfile_Ventura
+end installProfile
 
 -- ============================================================
 -- CLICK INSTALL BUTTON
@@ -762,13 +578,9 @@ on run argv
 	do shell script "echo " & quoted form of (my buildEnrollmentProfile(invitationID, jamfURL)) & " > /tmp/enrollmentProfile.mobileconfig"
 	my logMsg("Enrollment profile written.")
 
-	-- Install profile (macOS version-specific UI flow)
+	-- Install profile
 	my logMsg("Installing profile via UI (macOS " & macMajor & ")...")
-	if macMajor >= 26 then
-		my installProfile_Tahoe(adminPass, localAdmin, settingsApp)
-	else
-		my installProfile_Ventura(adminPass, localAdmin, settingsApp, macMajor)
-	end if
+	my installProfile(adminPass, localAdmin, settingsApp, macMajor)
 	my logMsg("Profile install UI flow complete.")
 
 	-- Wait for MDM enrollment to complete
