@@ -74,7 +74,7 @@ Instance launched from AMI
   • Authenticates with Jamf Pro (OAuth, falls back to Basic)
   • Creates enrollment invitation via Jamf API
   • Builds .mobileconfig profile
-  • Opens profile → presses Return on "Profile Downloaded" popup
+  • Opens profile → on macOS 15/26, presses Return to dismiss "Profile Downloaded" popup (macOS 14 has no popup)
   • Navigates to Device Management via URL scheme (works on all macOS versions)
   • Finds MDM Profile row by name, double-clicks with cliclick
   • Clicks Install → enters admin password into SecurityAgent
