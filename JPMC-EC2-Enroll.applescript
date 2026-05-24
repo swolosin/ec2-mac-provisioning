@@ -241,11 +241,15 @@ on installProfile(adminPass, localAdmin, settingsApp, macMajor)
 	delay 2
 
 	-- Dismiss popup and navigate to Device Management
+	-- macOS 15/26 show a "Profile Downloaded" popup — keystroke return dismisses it
+	-- macOS 14 has no popup, so we skip keystroke return
 	my logMsg("Dismissing popup and navigating to Device Management...")
 	tell application settingsApp to activate
 	delay 0.5
-	tell application "System Events" to keystroke return
-	delay 2
+	if macMajor is not 14 then
+		tell application "System Events" to keystroke return
+		delay 2
+	end if
 	do shell script "open 'x-apple.systempreferences:com.apple.preferences.configurationprofiles'"
 	delay 2
 	tell application settingsApp to activate
@@ -271,10 +275,11 @@ on installProfile(adminPass, localAdmin, settingsApp, macMajor)
 			end tell
 		end try
 		try
-			-- Sonoma / Sequoia: table path
+			-- Sonoma (macOS 14): table in group 2 of scroll area
 			tell application "System Events" to tell process settingsApp
-				get value of static text 1 of UI element 1 of row 2 of table 1 of scroll area 1 of group 1 of scroll area 1 of group 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
-				set targetRow to row 2 of table 1 of scroll area 1 of group 1 of scroll area 1 of group 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
+				tell table 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
+					if (count of rows) >= 2 then set targetRow to row 2
+				end tell
 			end tell
 		end try
 		if targetRow is not missing value then exit repeat
