@@ -31,6 +31,15 @@
 --   osascript /Users/Shared/JPMC-EC2-Enroll.scpt
 
 -- ============================================================
+-- SCRIPT-LEVEL CONSTANTS
+-- ============================================================
+
+-- Shell PATH used for every `do shell script` invocation that needs aws,
+-- curl, python3, etc. Broadest variant covers Homebrew installs at either
+-- /opt/homebrew (Apple Silicon default) or /usr/local (Intel/legacy).
+property AWS_PATH : "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin"
+
+-- ============================================================
 -- LOGGING
 -- All log entries are timestamped. LaunchAgent captures stderr
 -- (where AppleScript's `log` writes) to /Library/Logs/JPMC/EC2-Enroll.log.
@@ -80,7 +89,6 @@ end getProdFlag
 on imdsGet(mdPath)
 	set maxAttempts to 12
 	set retryDelay to 10
-	set awsPath to "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 	set startTime to (do shell script "date '+%s'")
 
 	-- Passive network gate (24 × 5s = 2 min max). launchd already waited,
@@ -101,9 +109,9 @@ on imdsGet(mdPath)
 
 	repeat with attempt from 1 to maxAttempts
 		try
-			set token to (do shell script "PATH=" & awsPath & " ; curl -sf --noproxy '169.254.169.254' --connect-timeout 5 --max-time 10 -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300'")
+			set token to (do shell script "PATH=" & AWS_PATH & " ; curl -sf --noproxy '169.254.169.254' --connect-timeout 5 --max-time 10 -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300'")
 			if length of token > 10 then
-				set mdResult to (do shell script "PATH=" & awsPath & " ; curl -sf --noproxy '169.254.169.254' --connect-timeout 5 --max-time 10 -H 'X-aws-ec2-metadata-token: " & token & "' 'http://169.254.169.254/latest/meta-data/" & mdPath & "'")
+				set mdResult to (do shell script "PATH=" & AWS_PATH & " ; curl -sf --noproxy '169.254.169.254' --connect-timeout 5 --max-time 10 -H 'X-aws-ec2-metadata-token: " & token & "' 'http://169.254.169.254/latest/meta-data/" & mdPath & "'")
 				set elapsed to (do shell script "echo $(( $(date '+%s') - " & startTime & " ))")
 				my logMsg("IMDS ok (attempt " & attempt & "/" & maxAttempts & ", waited " & elapsed & "s): " & mdPath & " = " & mdResult)
 				return mdResult
@@ -125,10 +133,9 @@ end imdsGet
 -- ============================================================
 
 on getSecret(secretRegion, secretID, keyName)
-	set awsPath to "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin"
 	my logMsg("Fetching secret key: " & keyName & " from " & secretID & " in " & secretRegion)
 	try
-		set secretJSON to (do shell script "PATH=" & awsPath & " ; aws secretsmanager get-secret-value --region " & quoted form of secretRegion & " --secret-id " & quoted form of secretID & " --query SecretString --output text 2>&1")
+		set secretJSON to (do shell script "PATH=" & AWS_PATH & " ; aws secretsmanager get-secret-value --region " & quoted form of secretRegion & " --secret-id " & quoted form of secretID & " --query SecretString --output text 2>&1")
 		if secretJSON contains "Error" or secretJSON contains "error" then
 			error "Secrets Manager returned error: " & secretJSON
 		end if
@@ -146,10 +153,9 @@ end getSecret
 -- ============================================================
 
 on getJamfToken(jamfURL, apiUser, apiPass)
-	set awsPath to "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 	-- Try OAuth client credentials first (modern Jamf)
 	try
-		set response to (do shell script "PATH=" & awsPath & " ; curl -sf -X POST '" & jamfURL & "api/oauth/token' -H 'Content-Type: application/x-www-form-urlencoded' --data-urlencode 'client_id=" & apiUser & "' --data-urlencode 'client_secret=" & apiPass & "' --data-urlencode 'grant_type=client_credentials' 2>&1")
+		set response to (do shell script "PATH=" & AWS_PATH & " ; curl -sf -X POST '" & jamfURL & "api/oauth/token' -H 'Content-Type: application/x-www-form-urlencoded' --data-urlencode 'client_id=" & apiUser & "' --data-urlencode 'client_secret=" & apiPass & "' --data-urlencode 'grant_type=client_credentials' 2>&1")
 		if response contains "access_token" then
 			set AppleScript's text item delimiters to "access_token\":\""
 			set tok to text item 2 of response
@@ -165,7 +171,7 @@ on getJamfToken(jamfURL, apiUser, apiPass)
 	-- Fall back to Basic auth
 	try
 		set b64 to (do shell script "/usr/bin/printf '" & apiUser & ":" & apiPass & "' | /usr/bin/base64")
-		set response to (do shell script "PATH=" & awsPath & " ; curl -sf -X POST '" & jamfURL & "api/v1/auth/token' -H 'Authorization: Basic " & b64 & "' 2>&1")
+		set response to (do shell script "PATH=" & AWS_PATH & " ; curl -sf -X POST '" & jamfURL & "api/v1/auth/token' -H 'Authorization: Basic " & b64 & "' 2>&1")
 		set AppleScript's text item delimiters to "\"token\":\""
 		set tok to text item 2 of response
 		set AppleScript's text item delimiters to "\""
@@ -180,11 +186,10 @@ on getJamfToken(jamfURL, apiUser, apiPass)
 end getJamfToken
 
 on createJamfInvitation(jamfURL, authToken, mgmtUser, mgmtPass)
-	set awsPath to "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 	set expiryDate to (do shell script "date -v+2d '+%Y-%m-%d %H:%M:%S'")
 	set invXML to "<?xml version=\"1.0\" encoding=\"UTF-8\"?><computer_invitation><invitation_type>DEFAULT</invitation_type><expiration_date>" & expiryDate & "</expiration_date><ssh_username>" & mgmtUser & "</ssh_username><ssh_password>" & mgmtPass & "</ssh_password><multiple_users_allowed>false</multiple_users_allowed><create_account_if_does_not_exist>true</create_account_if_does_not_exist><hide_account>true</hide_account></computer_invitation>"
 	try
-		set response to (do shell script "PATH=" & awsPath & " ; curl -sf -X POST '" & jamfURL & "JSSResource/computerinvitations/id/id0' -H 'Content-Type: application/xml' -H 'Authorization: Bearer " & authToken & "' -d " & quoted form of invXML & " 2>&1")
+		set response to (do shell script "PATH=" & AWS_PATH & " ; curl -sf -X POST '" & jamfURL & "JSSResource/computerinvitations/id/id0' -H 'Content-Type: application/xml' -H 'Authorization: Bearer " & authToken & "' -d " & quoted form of invXML & " 2>&1")
 		set AppleScript's text item delimiters to "<invitation>"
 		set invID to text item 2 of response
 		set AppleScript's text item delimiters to "</"
@@ -268,6 +273,14 @@ end clickRowWithFallback
 -- ============================================================
 
 on installProfile(adminPass, localAdmin, settingsApp, macMajor)
+	-- Defensive: bootout the macOS Diagnostics Reporter LaunchAgent so any
+	-- "Your computer was restarted because of a problem" dialog (left over from
+	-- the AMI's SIP-disable reboot panic) can't block System Settings UI.
+	-- Idempotent — silently no-ops on healthy instances where it isn't loaded.
+	try
+		do shell script "launchctl bootout gui/$(id -u)/com.apple.DiagnosticsReporter 2>/dev/null || true"
+	end try
+
 	my logMsg("Opening enrollment profile...")
 	do shell script "open /tmp/enrollmentProfile.mobileconfig"
 	delay 2
@@ -518,7 +531,6 @@ end runCleanup
 -- ============================================================
 
 on logFinalStatus(statusResult, instanceRegion, jamfURL, failReason)
-	set awsPath to "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 	set instanceID to "unknown"
 	try
 		-- Reuse imdsGet so we get retry, --noproxy, and elapsed timing for free
@@ -534,7 +546,7 @@ on logFinalStatus(statusResult, instanceRegion, jamfURL, failReason)
 	end if
 	-- Upload status directly to S3 so test pipeline can detect completion without SSM polling
 	try
-		do shell script "PATH=" & awsPath & " ; echo " & quoted form of statusJSON & " | aws s3 cp - s3://jpmc-ec2-enrollment-test-logs/enrollment-status/" & instanceID & ".json --region " & instanceRegion
+		do shell script "PATH=" & AWS_PATH & " ; echo " & quoted form of statusJSON & " | aws s3 cp - s3://jpmc-ec2-enrollment-test-logs/enrollment-status/" & instanceID & ".json --region " & instanceRegion
 	on error errMsg
 		my logMsg("WARNING: S3 status upload failed: " & errMsg)
 	end try
@@ -553,9 +565,6 @@ on run argv
 	if macMajor < 13 then set settingsApp to "System Preferences"
 
 	my logMsg("=== JPMC-EC2-Enroll started | macOS " & macMajor & " ===")
-
-	-- Enrollment mode (LaunchAgent fires at boot with no argv)
-	my logMsg("Mode: enrollment")
 
 	-- Short-circuit if already enrolled
 	try
