@@ -399,8 +399,14 @@ echo "Setting RandomizePassword = false..."
   /usr/local/aws/ec2-macos-init/init.toml
 /usr/bin/grep "RandomizePassword" /usr/local/aws/ec2-macos-init/init.toml
 
-echo "Clearing ec2-macos-init instance history..."
-/usr/bin/sudo /usr/local/bin/ec2-macos-init clean 2>&1
+echo "Clearing ec2-macos-init instance history (all instance IDs)..."
+# -all flag is AWS's documented best practice for AMI creation. Removes
+# every instance's history from /usr/local/aws/ec2-macos-init/instances/,
+# not just the current instance ID. Guarantees the AMI ships with a fully
+# blank ec2-macos-init state so the first boot from the AMI is treated as
+# a true first boot (SSH key injection, init.toml steps re-run, etc.).
+# Ref: https://github.com/aws/ec2-macos-init#clean
+/usr/bin/sudo /usr/local/bin/ec2-macos-init clean -all 2>&1
 echo "ec2-macos-init history cleared."
 
 # Clear any kernel panic / crash reports written during this instance's lifetime
