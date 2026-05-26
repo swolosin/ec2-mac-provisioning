@@ -50,17 +50,19 @@ REGION=$(curl -sS --noproxy '169.254.169.254' -H "X-aws-ec2-metadata-token: $TOK
 echo "Region: $REGION"
 
 echo "Retrieving credentials from Secrets Manager..."
-eval "$(aws secretsmanager get-secret-value \
+# Pull the SecretString once, extract the two fields we need with plutil
+# (Apple-native JSON tool), then drop the JSON blob from memory immediately
+# so we don't keep the full credential set living in env longer than needed.
+# plutil + direct variable assignment removes the `eval` from the old Python
+# pattern — fewer dangerous primitives in the path that handles passwords.
+SECRET_JSON=$(aws secretsmanager get-secret-value \
   --secret-id "$SECRET_ID" \
   --region "$REGION" \
   --query SecretString \
-  --output text \
-  | python3 -c "
-import sys, json, shlex
-s = json.load(sys.stdin)
-print(f'USER={shlex.quote(s[\"localAdmin\"])}')
-print(f'PW={shlex.quote(s[\"localAdminPassword\"])}')
-")"
+  --output text)
+USER=$(/bin/echo "$SECRET_JSON" | /usr/bin/plutil -extract localAdmin raw -)
+PW=$(/bin/echo "$SECRET_JSON" | /usr/bin/plutil -extract localAdminPassword raw -)
+unset SECRET_JSON
 [[ -n "$USER" && -n "$PW" ]] || { echo "ERROR: could not parse credentials" >&2; exit 1; }
 echo "User: $USER"
 

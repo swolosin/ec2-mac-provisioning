@@ -133,13 +133,15 @@ end imdsGet
 -- ============================================================
 
 on getSecret(secretRegion, secretID, keyName)
+	-- Fetch a single key from an AWS Secrets Manager SecretString (JSON).
+	-- Parse with plutil — Apple-native JSON/plist tool, no third-party deps,
+	-- no eval, smaller audit surface than Python. If aws CLI fails (non-zero
+	-- exit) or plutil can't find the key, `do shell script` throws into the
+	-- catch block; the substring "contains Error" heuristic is no longer needed.
 	my logMsg("Fetching secret key: " & keyName & " from " & secretID & " in " & secretRegion)
 	try
-		set secretJSON to (do shell script "PATH=" & AWS_PATH & " ; aws secretsmanager get-secret-value --region " & quoted form of secretRegion & " --secret-id " & quoted form of secretID & " --query SecretString --output text 2>&1")
-		if secretJSON contains "Error" or secretJSON contains "error" then
-			error "Secrets Manager returned error: " & secretJSON
-		end if
-		set val to (do shell script "echo " & quoted form of secretJSON & " | /usr/bin/python3 -c \"import sys,json; d=json.load(sys.stdin); print(d['" & keyName & "'])\"")
+		set secretJSON to (do shell script "PATH=" & AWS_PATH & " ; aws secretsmanager get-secret-value --region " & quoted form of secretRegion & " --secret-id " & quoted form of secretID & " --query SecretString --output text")
+		set val to (do shell script "echo " & quoted form of secretJSON & " | /usr/bin/plutil -extract " & keyName & " raw -")
 		my logMsg("Secret key retrieved: " & keyName)
 		return val
 	on error errMsg
