@@ -153,32 +153,19 @@ end getSecret
 -- ============================================================
 
 on getJamfToken(jamfURL, apiUser, apiPass)
-	-- Try OAuth client credentials first (modern Jamf)
+	-- Modern Jamf Pro API (10.49+) returns JSON:
+	--   {"access_token":"...","scope":"...","token_type":"Bearer","expires_in":1200}
+	-- Parse with plutil (native macOS JSON/plist tool) instead of fragile
+	-- string-splitting on whitespace. The token is used immediately for the
+	-- enrollment invitation call, so short token TTLs (JPMC uses ~60s) are fine.
 	try
 		set response to (do shell script "PATH=" & AWS_PATH & " ; curl -sf -X POST '" & jamfURL & "api/oauth/token' -H 'Content-Type: application/x-www-form-urlencoded' --data-urlencode 'client_id=" & apiUser & "' --data-urlencode 'client_secret=" & apiPass & "' --data-urlencode 'grant_type=client_credentials' 2>&1")
-		if response contains "access_token" then
-			set AppleScript's text item delimiters to "access_token\":\""
-			set tok to text item 2 of response
-			set AppleScript's text item delimiters to "\""
-			set tok to text item 1 of tok
-			set AppleScript's text item delimiters to ""
+		set tok to (do shell script "echo " & quoted form of response & " | /usr/bin/plutil -extract access_token raw -")
+		if length of tok > 20 then
 			my logMsg("Jamf auth: OAuth client credentials succeeded")
 			return tok
 		end if
-	on error errMsg
-		my logMsg("Jamf OAuth attempt failed: " & errMsg & " — trying Basic auth")
-	end try
-	-- Fall back to Basic auth
-	try
-		set b64 to (do shell script "/usr/bin/printf '" & apiUser & ":" & apiPass & "' | /usr/bin/base64")
-		set response to (do shell script "PATH=" & AWS_PATH & " ; curl -sf -X POST '" & jamfURL & "api/v1/auth/token' -H 'Authorization: Basic " & b64 & "' 2>&1")
-		set AppleScript's text item delimiters to "\"token\":\""
-		set tok to text item 2 of response
-		set AppleScript's text item delimiters to "\""
-		set tok to text item 1 of tok
-		set AppleScript's text item delimiters to ""
-		my logMsg("Jamf auth: Basic auth succeeded")
-		return tok
+		error "Token response did not contain a valid access_token: " & response
 	on error errMsg
 		my logMsg("ERROR: Jamf authentication failed: " & errMsg)
 		error "Jamf authentication failed: " & errMsg
@@ -190,11 +177,9 @@ on createJamfInvitation(jamfURL, authToken, mgmtUser, mgmtPass)
 	set invXML to "<?xml version=\"1.0\" encoding=\"UTF-8\"?><computer_invitation><invitation_type>DEFAULT</invitation_type><expiration_date>" & expiryDate & "</expiration_date><ssh_username>" & mgmtUser & "</ssh_username><ssh_password>" & mgmtPass & "</ssh_password><multiple_users_allowed>false</multiple_users_allowed><create_account_if_does_not_exist>true</create_account_if_does_not_exist><hide_account>true</hide_account></computer_invitation>"
 	try
 		set response to (do shell script "PATH=" & AWS_PATH & " ; curl -sf -X POST '" & jamfURL & "JSSResource/computerinvitations/id/id0' -H 'Content-Type: application/xml' -H 'Authorization: Bearer " & authToken & "' -d " & quoted form of invXML & " 2>&1")
-		set AppleScript's text item delimiters to "<invitation>"
-		set invID to text item 2 of response
-		set AppleScript's text item delimiters to "</"
-		set invID to text item 1 of invID
-		set AppleScript's text item delimiters to ""
+		-- Classic JSS API returns XML. Parse with xmllint XPath (native macOS)
+		-- instead of fragile <invitation>...</invitation> string-splitting.
+		set invID to (do shell script "echo " & quoted form of response & " | /usr/bin/xmllint --xpath 'string(//computer_invitation/invitation)' -")
 		if length of invID < 1 then error "Empty invitation ID — response: " & response
 		my logMsg("Enrollment invitation created: " & invID)
 		return invID
