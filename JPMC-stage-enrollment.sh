@@ -337,7 +337,7 @@ echo "=== Phase 6: Install LaunchAgent ==="
 				<key>RequireNetworkConnectivity</key>
 				<true/>
 				<key>GracePeriod</key>
-				<integer>300</integer>
+				<integer>3600</integer>
 				<key>Priority</key>
 				<string>Utility</string>
 				<key>Repeating</key>
