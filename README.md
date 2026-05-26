@@ -65,7 +65,7 @@ Instance launched from AMI
         │
         ▼
   launchd holds LaunchAgent until network is ready
-  (xpc.activity + RequireNetworkConnectivity, 30s delay, 5 min grace)
+  (xpc.activity + RequireNetworkConnectivity, 30s delay, 1 hour grace)
         │
         ▼
   LaunchAgent fires → osascript JPMC-EC2-Enroll.scpt

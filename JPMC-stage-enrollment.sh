@@ -17,9 +17,10 @@
 # Prepares an EC2 Mac staging instance for headless Jamf MDM enrollment.
 # Uses JPMC-EC2-Enroll.scpt instead of the AWS enroll-ec2-mac.scpt,
 # which fixes:
-#   - IMDS retry logic (boot-time exit code 7 failure)
+#   - launchd xpc.activity gates the LaunchAgent until network is ready
+#   - IMDS retry logic with --noproxy and elapsed-time logging
 #   - macOS 26 Device Management navigation (sidebarTarget crash)
-#   - No external dependencies (no cliclick required)
+#   - cliclick cached locally so the AMI does not depend on Homebrew at boot
 #
 # Requirements:
 #   - Run as ec2-user (NOT root)

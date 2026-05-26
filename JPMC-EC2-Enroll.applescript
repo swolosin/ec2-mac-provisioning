@@ -16,9 +16,10 @@
 -- Supports: macOS 14 (Sonoma), 15 (Sequoia), 26 (Tahoe)
 --
 -- Key improvements over enroll-ec2-mac.scpt:
---   - IMDS retry logic (fixes boot-time exit code 7 failure)
+--   - launchd xpc.activity gates the LaunchAgent until network is ready
+--   - IMDS retry logic with --noproxy, scutil --nwi gate, elapsed timing
 --   - macOS 26 Device Management navigation (no sidebarTarget crash)
---   - No external dependencies (no cliclick)
+--   - cliclick cached to /Users/Shared/._jpmc-tools/ (no Homebrew dep at boot)
 --   - Hardcoded fallback is "mdmSecret" not "jamfSecret"
 --   - Timestamped logging to /Library/Logs/JPMC/
 --
@@ -247,7 +248,9 @@ on clickRowWithFallback(targetRow, settingsApp)
 
 	-- Single surgical cliclick dc: — click once and hand off to clickInstallButton.
 	-- clickInstallButton loops until the Install button appears and clicks it,
-	-- matching AWS's approach. If the whole flow fails, ThrottleInterval retries.
+	-- matching AWS's approach. If the whole flow fails, the script exits with
+	-- error and downstream pipeline detects failure via ENROLLMENT_STATUS:FAILED
+	-- and terminates/rebuilds the instance.
 	my logMsg("Row click: cliclick dc:(" & clickX & "," & clickY & ")...")
 	tell application settingsApp to activate
 	delay 1
