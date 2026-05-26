@@ -48,6 +48,8 @@ JPMC-stage-enrollment.sh
   • Writes LaunchAgent plist directly to /Library/LaunchAgents/
   • Disables RandomizePassword in ec2-macos-init
   • Clears ec2-macos-init instance history
+  • Clears /Library/Logs/DiagnosticReports/ panic + ips files so the AMI
+    doesn't ship with stale crash reports that trigger the boot dialog
         │
         ▼
    Snapshot AMI
@@ -76,7 +78,8 @@ Instance launched from AMI
   • scutil --nwi passive gate confirms interface is up (defense in depth)
   • Gets region from IMDS with --noproxy (12 retries / 10s — handles transient IMDS hiccups)
   • Retrieves all credentials from Secrets Manager
-  • Authenticates with Jamf Pro (OAuth, falls back to Basic)
+  • Authenticates with Jamf Pro via /api/oauth/token (OAuth client credentials)
+  • Dismisses any "Your computer was restarted" dialog left by SIP-disable panic (bootout DiagnosticsReporter)
   • Creates enrollment invitation via Jamf API
   • Builds .mobileconfig profile
   • Opens profile → on macOS 15/26, presses Return to dismiss "Profile Downloaded" popup (macOS 14 has no popup)
@@ -178,7 +181,7 @@ All logs are written to `/Library/Logs/JPMC/` which persists across reboots and 
 Every log entry is timestamped:
 ```
 2026-05-21 03:30:44  === JPMC-EC2-Enroll started | macOS 26 ===
-2026-05-21 03:30:46  IMDS ok (attempt 1/12, waited 2s): placement/region = us-east-2
+2026-05-21 03:30:44  IMDS ok (attempt 1/12, waited 0s): placement/region = us-east-2
 2026-05-21 03:31:00  MDM Profile found — opening install sheet...
 2026-05-21 03:31:13  MDM enrollment confirmed via CLI (poll 2)
 2026-05-21 03:31:13  === JPMC-EC2-Enroll: SUCCESS ===
@@ -204,6 +207,17 @@ In addition to the log, enrollment status is uploaded directly to S3 (`enrollmen
 ### Network readiness — xpc.activity
 
 The LaunchAgent does not use `RunAtLoad`. Instead it uses `xpc.activity` with `RequireNetworkConnectivity = true`, `Delay = 30`, and `GracePeriod = 3600` (1 hour). launchd holds the agent at boot until the network interface is confirmed ready in SCDynamicStore (same source that `scutil --nwi` reads from), then waits 30 seconds before firing. This is the same pattern Apple's own system daemons use (`softwareupdated`, `fairplaydeviceidentityd`, `online-auth-agent`). The script doesn't poll for network — launchd does.
+
+### macOS panic dialog at boot ("Your computer was restarted because of a problem")
+
+The AWS SIP-disable API forces an instance reboot which occasionally triggers a kernel panic in `IOSkywalkKernelPipeBSDClient` (60s busy timeout during shutdown). macOS writes a `.panic` file to `/Library/Logs/DiagnosticReports/`, and at the next boot the `Diagnostics Reporter` LaunchAgent shows a modal dialog that blocks System Settings UI automation.
+
+This is handled in two places:
+
+1. **`JPMC-stage-enrollment.sh` Phase 8** clears `*.panic` and `*.ips` files before AMI snapshot, so future AMIs ship clean.
+2. **`JPMC-EC2-Enroll.applescript installProfile`** runs `launchctl bootout gui/$(id -u)/com.apple.DiagnosticsReporter` at the top, dismissing the dialog defensively if it ever appears. Idempotent — silently no-ops on healthy instances.
+
+The combination means existing AMIs (with the panic file baked in) still enroll successfully via the runtime bootout, and new AMIs (built with the updated stage script) never have the file at all.
 
 ### Automatic retry — ThrottleInterval
 
@@ -268,11 +282,14 @@ When `PROD_FLAG="1"` is set in the stage script, after successful enrollment the
 
 ## Security
 
-- Passwords are never written to disk, never appear in argv, env vars, or shell history
+- Passwords are never written to disk, never appear in env vars, or shell history
 - Credentials live only in AppleScript runtime memory during enrollment
 - Admin password is placed on clipboard for SecurityAgent, then immediately cleared twice
 - All secrets are retrieved live from Secrets Manager at runtime — nothing is baked into the AMI
 - The IAM instance profile provides temporary credentials — no long-lived keys anywhere
+- Secrets Manager JSON parsed with `plutil` (Apple-native, no third-party deps) instead of Python + eval — eliminates shell evaluation of dynamically-constructed strings from the credential code path
+- After fields are extracted, the full SecretString JSON is explicitly `unset` so the bundled credential set doesn't linger in process environment longer than the moment it's needed
+- IMDS calls use `--noproxy '169.254.169.254'` so link-local metadata requests bypass any `http_proxy` env var (corporate proxy environments)
 
 ---
 
@@ -291,3 +308,7 @@ When `PROD_FLAG="1"` is set in the stage script, after successful enrollment the
 | Machine-readable status | None | `ENROLLMENT_STATUS:` JSON line + S3 status file |
 | Secret name fallback | Falls back to `"jamfSecret"` | Falls back to `"mdmSecret"`, logs warning |
 | Post-enrollment cleanup | Removes cliclick via brew | Removes entire `._jpmc-tools/` cache + script + LaunchAgent plist |
+| Panic dialog at boot | Blocks UI automation, no handling | Stage script clears `.panic` files pre-snapshot; enrollment script bootouts `DiagnosticsReporter` defensively at runtime |
+| Secrets Manager JSON parsing | Python + `eval` + `shlex.quote` (shell anti-pattern flagged by SAST) | `plutil -extract raw` — Apple-native, no eval, no third-party deps |
+| Jamf authentication | Basic auth (deprecated in modern Jamf Pro) | OAuth client credentials via `/api/oauth/token`, parsed with `plutil` |
+| Jamf XML invitation parsing | Fragile text-item-delimiter string splitting | `xmllint --xpath` — native macOS, schema-aware |

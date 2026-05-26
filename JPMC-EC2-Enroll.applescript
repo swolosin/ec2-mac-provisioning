@@ -20,7 +20,9 @@
 --   - IMDS retry logic with --noproxy, scutil --nwi gate, elapsed timing
 --   - macOS 26 Device Management navigation (no sidebarTarget crash)
 --   - cliclick cached to /Users/Shared/._jpmc-tools/ (no Homebrew dep at boot)
---   - Hardcoded fallback is "mdmSecret" not "jamfSecret"
+--   - Defensive bootout of DiagnosticsReporter at top of installProfile
+--     (handles "Computer was restarted" dialog left by SIP-disable panic)
+--   - plutil + xmllint for JSON/XML parsing (native macOS, no Python eval)
 --   - Timestamped logging to /Library/Logs/JPMC/
 --
 -- Configuration:
@@ -35,8 +37,8 @@
 -- ============================================================
 
 -- Shell PATH used for every `do shell script` invocation that needs aws,
--- curl, python3, etc. Broadest variant covers Homebrew installs at either
--- /opt/homebrew (Apple Silicon default) or /usr/local (Intel/legacy).
+-- curl, plutil, xmllint, etc. Broadest variant covers Homebrew installs
+-- at either /opt/homebrew (Apple Silicon default) or /usr/local (Intel/legacy).
 property AWS_PATH : "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin"
 
 -- ============================================================
@@ -161,7 +163,7 @@ on getJamfToken(jamfURL, apiUser, apiPass)
 	-- string-splitting on whitespace. The token is used immediately for the
 	-- enrollment invitation call, so short token TTLs (JPMC uses ~60s) are fine.
 	try
-		set response to (do shell script "PATH=" & AWS_PATH & " ; curl -sf -X POST '" & jamfURL & "api/oauth/token' -H 'Content-Type: application/x-www-form-urlencoded' --data-urlencode 'client_id=" & apiUser & "' --data-urlencode 'client_secret=" & apiPass & "' --data-urlencode 'grant_type=client_credentials' 2>&1")
+		set response to (do shell script "PATH=" & AWS_PATH & " ; curl -sf -X POST '" & jamfURL & "api/oauth/token' -H 'Content-Type: application/x-www-form-urlencoded' --data-urlencode 'client_id=" & apiUser & "' --data-urlencode 'client_secret=" & apiPass & "' --data-urlencode 'grant_type=client_credentials'")
 		set tok to (do shell script "echo " & quoted form of response & " | /usr/bin/plutil -extract access_token raw -")
 		if length of tok > 20 then
 			my logMsg("Jamf auth: OAuth client credentials succeeded")
@@ -178,7 +180,7 @@ on createJamfInvitation(jamfURL, authToken, mgmtUser, mgmtPass)
 	set expiryDate to (do shell script "date -v+2d '+%Y-%m-%d %H:%M:%S'")
 	set invXML to "<?xml version=\"1.0\" encoding=\"UTF-8\"?><computer_invitation><invitation_type>DEFAULT</invitation_type><expiration_date>" & expiryDate & "</expiration_date><ssh_username>" & mgmtUser & "</ssh_username><ssh_password>" & mgmtPass & "</ssh_password><multiple_users_allowed>false</multiple_users_allowed><create_account_if_does_not_exist>true</create_account_if_does_not_exist><hide_account>true</hide_account></computer_invitation>"
 	try
-		set response to (do shell script "PATH=" & AWS_PATH & " ; curl -sf -X POST '" & jamfURL & "JSSResource/computerinvitations/id/id0' -H 'Content-Type: application/xml' -H 'Authorization: Bearer " & authToken & "' -d " & quoted form of invXML & " 2>&1")
+		set response to (do shell script "PATH=" & AWS_PATH & " ; curl -sf -X POST '" & jamfURL & "JSSResource/computerinvitations/id/id0' -H 'Content-Type: application/xml' -H 'Authorization: Bearer " & authToken & "' -d " & quoted form of invXML)
 		-- Classic JSS API returns XML. Parse with xmllint XPath (native macOS)
 		-- instead of fragile <invitation>...</invitation> string-splitting.
 		set invID to (do shell script "echo " & quoted form of response & " | /usr/bin/xmllint --xpath 'string(//computer_invitation/invitation)' -")

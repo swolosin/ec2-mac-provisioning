@@ -22,10 +22,11 @@
 # Passwords are never written to disk, never appear in argv, and
 # never live in a shell variable longer than the immediate command needs.
 #
-# Run via SSH as ec2-user after launching a vanilla macOS EC2 instance.
+# Run as ec2-user. In production, invoked via SSM (AWS-RunShellScript)
+# by the run_setup Lambda in the staging Step Functions pipeline.
 # Do NOT run as root or via User Data.
 #
-# Usage:
+# Manual invocation (for debugging only):
 #   scp -i key.pem JPMC-setup-user.sh ec2-user@<ip>:/tmp/
 #   ssh -i key.pem ec2-user@<ip>
 #   chmod +x /tmp/JPMC-setup-user.sh && /tmp/JPMC-setup-user.sh
@@ -102,7 +103,10 @@ echo "Setting autoLoginUser..."
 sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser -string "$USER"
 
 echo "Generating /etc/kcpassword..."
-echo "$PW" | python3 -c "
+# Here-string `<<<` keeps the password inside the shell process — zsh handles
+# this internally without forking an `echo` child whose argv would briefly
+# show the password in `ps`. The Python doing the XOR encoding is unchanged.
+python3 -c "
 import sys
 pw = sys.stdin.read().rstrip('\n')
 key = bytes([0x7D,0x89,0x52,0x23,0xD2,0xBC,0xDD,0xEA,0xA3,0xB9,0x1F])
@@ -110,7 +114,7 @@ encoded = bytes((ord(c) ^ key[i % len(key)]) for i, c in enumerate(pw))
 while len(encoded) % 12 != 0:
     encoded += b'\x00'
 sys.stdout.buffer.write(encoded)
-" | sudo tee /etc/kcpassword > /dev/null
+" <<< "$PW" | sudo tee /etc/kcpassword > /dev/null
 sudo chmod 600 /etc/kcpassword
 sudo chown root:wheel /etc/kcpassword
 sleep 10
