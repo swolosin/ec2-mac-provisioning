@@ -403,6 +403,16 @@ echo "Clearing ec2-macos-init instance history..."
 /usr/bin/sudo /usr/local/bin/ec2-macos-init clean 2>&1
 echo "ec2-macos-init history cleared."
 
+# Clear any kernel panic / crash reports written during this instance's lifetime
+# (most commonly from the SIP-disable reboot's IOSkywalk 60s busy timeout panic).
+# Leaving these on disk would cause every instance launched from the resulting
+# AMI to show the "Your computer was restarted because of a problem" dialog at
+# first boot, which can block System Settings UI automation during enrollment.
+echo "Clearing diagnostic reports so they don't get baked into the AMI..."
+/usr/bin/sudo /bin/rm -f /Library/Logs/DiagnosticReports/*.panic /Library/Logs/DiagnosticReports/*.ips 2>/dev/null || true
+echo "Diagnostic reports remaining:"
+/usr/bin/sudo /bin/ls /Library/Logs/DiagnosticReports/ 2>/dev/null | /usr/bin/grep -iE "panic|ips" || echo "  (none)"
+
 echo ""
 echo "=== Phase 8 complete ==="
 echo ""
