@@ -64,12 +64,17 @@ Instance launched from AMI
   Auto-login fires (ec2-user)
         │
         ▼
+  launchd holds LaunchAgent until network is ready
+  (xpc.activity + RequireNetworkConnectivity, 30s delay, 5 min grace)
+        │
+        ▼
   LaunchAgent fires → osascript JPMC-EC2-Enroll.scpt
         │
         ▼
   JPMC-EC2-Enroll.scpt
   • Reads MMSecret from defaults
-  • Gets region from IMDS (12 retries / 10s intervals — handles boot-time delays)
+  • scutil --nwi passive gate confirms interface is up (defense in depth)
+  • Gets region from IMDS with --noproxy (12 retries / 10s — handles transient IMDS hiccups)
   • Retrieves all credentials from Secrets Manager
   • Authenticates with Jamf Pro (OAuth, falls back to Basic)
   • Creates enrollment invitation via Jamf API
@@ -173,12 +178,14 @@ All logs are written to `/Library/Logs/JPMC/` which persists across reboots and 
 Every log entry is timestamped:
 ```
 2026-05-21 03:30:44  === JPMC-EC2-Enroll started | macOS 26 ===
-2026-05-21 03:30:46  IMDS ok (attempt 4/12): placement/region = us-east-2
+2026-05-21 03:30:46  IMDS ok (attempt 1/12, waited 2s): placement/region = us-east-2
 2026-05-21 03:31:00  MDM Profile found — opening install sheet...
 2026-05-21 03:31:13  MDM enrollment confirmed via CLI (poll 2)
 2026-05-21 03:31:13  === JPMC-EC2-Enroll: SUCCESS ===
 2026-05-21 03:31:13  ENROLLMENT_STATUS: {"status":"SUCCESS",...}
 ```
+
+The `waited Xs` value on the `IMDS ok` line is the elapsed time between `imdsGet` being called and IMDS returning. With launchd holding the agent until network is ready, this should be `0s` or `1s` in normal operation. A larger number means IMDS itself was slow to respond.
 
 ### Machine-Readable Status Line
 
@@ -194,9 +201,13 @@ In addition to the log, enrollment status is uploaded directly to S3 (`enrollmen
 
 ## Troubleshooting
 
+### Network readiness — xpc.activity
+
+The LaunchAgent does not use `RunAtLoad`. Instead it uses `xpc.activity` with `RequireNetworkConnectivity = true`, `Delay = 30`, and `GracePeriod = 300`. launchd holds the agent at boot until the network interface is confirmed ready in SCDynamicStore (same source that `scutil --nwi` reads from), then waits 30 seconds before firing. This is the same pattern Apple's own system daemons use (`softwareupdated`, `fairplaydeviceidentityd`, `online-auth-agent`). The script doesn't poll for network — launchd does.
+
 ### Automatic retry — ThrottleInterval
 
-The LaunchAgent is configured with `ThrottleInterval = 300`. If the enrollment script exits with an error (e.g. IMDS not ready at boot), launchd automatically retries it every 5 minutes until it succeeds. You will see multiple `=== JPMC-EC2-Enroll started ===` entries in the log — this is expected behavior, not a problem. Once enrollment succeeds and prodFlag=1 cleanup runs, the LaunchAgent removes itself and retries stop.
+The LaunchAgent is also configured with `ThrottleInterval = 300` as a backstop. If the enrollment script exits with an error after launchd hands off (e.g. Jamf API unreachable, Secrets Manager auth fails), launchd automatically retries it every 5 minutes until it succeeds. You will see multiple `=== JPMC-EC2-Enroll started ===` entries in the log — this is expected behavior, not a problem. Once enrollment succeeds and prodFlag=1 cleanup runs, the LaunchAgent removes itself and retries stop.
 
 ### Force-retrigger enrollment
 
@@ -232,7 +243,8 @@ Finder → ⌘K → `vnc://localhost` — log in as `ec2-user`.
 |---|---|---|
 | `NoCredentials` in log | IAM instance profile not attached | EC2 console → Actions → Security → Modify IAM role |
 | `AccessDeniedException` | IAM policy missing or wrong secret ARN | Update IAM policy |
-| `IMDS unavailable after 12 attempts` | Network not ready at boot | LaunchAgent will retry automatically every 5 minutes |
+| `IMDS unavailable after 12 attempts (Xs elapsed)` | Real IMDS failure (network is already confirmed up by launchd before script fires) | Check elapsed time — if long, investigate IMDS service health. LaunchAgent will retry automatically every 5 minutes |
+| `Network interface not ready (scutil --nwi) — waiting...` | launchd fired the agent but interface flapped briefly | Defense-in-depth gate, will pass when interface returns. Should be rare |
 | `MDM Profile not found` | Profile popup not dismissed correctly | Check log for navigation step, kickstart to retry |
 | `cliclick failed on all paths` | cliclick binary missing from AMI | Re-stage — Phase 2 of stage script installs and caches it |
 
@@ -268,7 +280,9 @@ When `PROD_FLAG="1"` is set in the stage script, after successful enrollment the
 
 | Issue | AWS Script | JPMC Script |
 |---|---|---|
-| Boot-time IMDS failure (exit code 7) | No retry — fails silently | 12 retries with 10s intervals + ThrottleInterval auto-retry |
+| Boot-time IMDS failure (exit code 7) | No retry — fails silently | launchd holds agent until network is ready (`xpc.activity` + `RequireNetworkConnectivity`), then 12 retries with 10s intervals + `scutil --nwi` gate + ThrottleInterval auto-retry |
+| Curl through corporate proxy | Routes link-local through proxy, fails | `--noproxy '169.254.169.254'` on all IMDS calls — direct route regardless of env vars |
+| No visibility into network wait time | Blind to delays like the v6 multi-hour hang | Elapsed time logged on every IMDS success and failure |
 | macOS 26 Tahoe navigation | Crashes (`sidebarTarget` undefined) | URL scheme direct to Device Management |
 | macOS 14/15 support | Limited | Full support — unified installation flow across all versions |
 | Log persistence | `/tmp/` — wiped on reboot | `/Library/Logs/JPMC/` — persists |

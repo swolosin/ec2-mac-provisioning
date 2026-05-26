@@ -326,8 +326,25 @@ echo "=== Phase 6: Install LaunchAgent ==="
 		<string>/usr/bin/osascript</string>
 		<string>/Users/Shared/JPMC-EC2-Enroll.scpt</string>
 	</array>
-	<key>RunAtLoad</key>
-	<true/>
+	<key>LaunchEvents</key>
+	<dict>
+		<key>com.apple.xpc.activity</key>
+		<dict>
+			<key>com.jpmc.ec2.mdm.enrollment.boot</key>
+			<dict>
+				<key>Delay</key>
+				<integer>30</integer>
+				<key>RequireNetworkConnectivity</key>
+				<true/>
+				<key>GracePeriod</key>
+				<integer>300</integer>
+				<key>Priority</key>
+				<string>Utility</string>
+				<key>Repeating</key>
+				<false/>
+			</dict>
+		</dict>
+	</dict>
 	<key>ThrottleInterval</key>
 	<integer>300</integer>
 	<key>StandardErrorPath</key>

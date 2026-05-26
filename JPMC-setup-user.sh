@@ -40,9 +40,11 @@ readonly SECRET_ID="mdmSecret"
 # =====================================================
 
 echo "Getting region from IMDS..."
-TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" \
+# --noproxy ensures link-local 169.254.169.254 goes direct even if a corporate
+# proxy is configured via http_proxy env var (curl ignores macOS System Settings).
+TOKEN=$(curl -sS --noproxy '169.254.169.254' -X PUT "http://169.254.169.254/latest/api/token" \
   -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
-REGION=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" \
+REGION=$(curl -sS --noproxy '169.254.169.254' -H "X-aws-ec2-metadata-token: $TOKEN" \
   http://169.254.169.254/latest/meta-data/placement/region)
 [[ -n "$REGION" ]] || { echo "ERROR: could not determine region from IMDS" >&2; exit 1; }
 echo "Region: $REGION"

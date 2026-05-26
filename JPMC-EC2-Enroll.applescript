@@ -63,20 +63,48 @@ end getProdFlag
 
 -- ============================================================
 -- IMDS WITH RETRY
--- Fixes the boot-time timing issue where curl returns exit code 7
--- because the network stack isn't fully ready when the LaunchAgent fires.
+-- LaunchAgent is gated by launchd xpc.activity RequireNetworkConnectivity
+-- (see stage-enrollment.sh plist), so by the time this runs the network
+-- interface is already up. Defense-in-depth here:
+--   1. scutil --nwi passive gate — confirms SCDynamicStore shows an
+--      active interface with an address. Reads same state launchd uses.
+--      Cheap, no network traffic, won't burn IMDS attempts on boot noise.
+--   2. IMDS retry loop — 12 attempts × 10s for true transient IMDS hiccups.
+--   3. --noproxy on curl — link-local 169.254.169.254 must go direct,
+--      not through any http_proxy env var (corporate proxy environments).
+-- Elapsed time is logged on success and failure so the log shows exactly
+-- how long the wait was if anything ever goes wrong.
 -- ============================================================
 
 on imdsGet(mdPath)
 	set maxAttempts to 12
 	set retryDelay to 10
 	set awsPath to "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+	set startTime to (do shell script "date '+%s'")
+
+	-- Passive network gate (24 × 5s = 2 min max). launchd already waited,
+	-- but if for some reason the interface flapped after, hold here.
+	set gateAttempts to 0
+	repeat 24 times
+		set gateAttempts to gateAttempts + 1
+		try
+			do shell script "/usr/sbin/scutil --nwi | /usr/bin/grep -q 'address'"
+			exit repeat
+		on error
+			if gateAttempts is 1 then
+				my logMsg("Network interface not ready (scutil --nwi) — waiting...")
+			end if
+			delay 5
+		end try
+	end repeat
+
 	repeat with attempt from 1 to maxAttempts
 		try
-			set token to (do shell script "PATH=" & awsPath & " ; curl -sf --connect-timeout 5 --max-time 10 -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300'")
+			set token to (do shell script "PATH=" & awsPath & " ; curl -sf --noproxy '169.254.169.254' --connect-timeout 5 --max-time 10 -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300'")
 			if length of token > 10 then
-				set mdResult to (do shell script "PATH=" & awsPath & " ; curl -sf --connect-timeout 5 --max-time 10 -H 'X-aws-ec2-metadata-token: " & token & "' 'http://169.254.169.254/latest/meta-data/" & mdPath & "'")
-				my logMsg("IMDS ok (attempt " & attempt & "/" & maxAttempts & "): " & mdPath & " = " & mdResult)
+				set mdResult to (do shell script "PATH=" & awsPath & " ; curl -sf --noproxy '169.254.169.254' --connect-timeout 5 --max-time 10 -H 'X-aws-ec2-metadata-token: " & token & "' 'http://169.254.169.254/latest/meta-data/" & mdPath & "'")
+				set elapsed to (do shell script "echo $(( $(date '+%s') - " & startTime & " ))")
+				my logMsg("IMDS ok (attempt " & attempt & "/" & maxAttempts & ", waited " & elapsed & "s): " & mdPath & " = " & mdResult)
 				return mdResult
 			end if
 		on error errMsg
@@ -87,7 +115,8 @@ on imdsGet(mdPath)
 			delay retryDelay
 		end if
 	end repeat
-	error "IMDS unavailable after " & maxAttempts & " attempts — network may not be ready"
+	set elapsed to (do shell script "echo $(( $(date '+%s') - " & startTime & " ))")
+	error "IMDS unavailable after " & maxAttempts & " attempts (" & elapsed & "s elapsed) — network may not be ready"
 end imdsGet
 
 -- ============================================================
@@ -176,12 +205,12 @@ on buildEnrollmentProfile(invitationID, jamfURL)
 end buildEnrollmentProfile
 
 -- ============================================================
--- CLICK ROW WITH FALLBACK
--- Three-layer approach for 100% reliability:
--- 1. Native AppleScript select + double-click
--- 2. Python/Quartz CGEvent (coordinate-based, no dependency)
--- 3. cliclick (coordinate-based, cached to /Users/Shared/._jpmc-tools/)
--- Each attempt is logged. Proceeds after all attempts regardless.
+-- CLICK PROFILE ROW
+-- Coordinate-based double-click via cliclick. Coordinates come from
+-- AppleScript's System Events position/size on the target row.
+-- cliclick is cached to /Users/Shared/._jpmc-tools/ by stage-enrollment.sh
+-- Phase 2 before AMI snapshot, so it is always present at boot.
+-- Errors hard if cliclick is missing — staging is broken if that happens.
 -- ============================================================
 
 on clickRowWithFallback(targetRow, settingsApp)
@@ -489,8 +518,8 @@ on logFinalStatus(statusResult, instanceRegion, jamfURL, failReason)
 	set awsPath to "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 	set instanceID to "unknown"
 	try
-		set token to (do shell script "PATH=" & awsPath & " ; curl -sf --connect-timeout 5 --max-time 10 -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300'")
-		set instanceID to (do shell script "PATH=" & awsPath & " ; curl -sf --connect-timeout 5 --max-time 10 -H 'X-aws-ec2-metadata-token: " & token & "' 'http://169.254.169.254/latest/meta-data/instance-id'")
+		-- Reuse imdsGet so we get retry, --noproxy, and elapsed timing for free
+		set instanceID to my imdsGet("instance-id")
 	end try
 	set statusJSON to ""
 	if statusResult is "SUCCESS" then
