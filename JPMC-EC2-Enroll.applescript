@@ -591,11 +591,13 @@ on run argv
 	if not (jamfURL ends with "/") then set jamfURL to jamfURL & "/"
 	my logMsg("Jamf URL: " & jamfURL)
 
-	-- Set Jamf VM flag so EC2 Mac is not treated as a VM in Jamf records
+	-- Set Jamf VM flag so EC2 Mac is not treated as a VM in Jamf records.
+	-- Writes <false/> (proper CFBoolean) to /Library/Preferences/ — the only
+	-- location the Jamf binary reads from. Absolute path on defaults matches
+	-- the script's existing convention for shell tools.
 	try
-		do shell script "defaults write /Library/Preferences/com.jamfsoftware.jamf is_virtual_machine 0" user name localAdmin password adminPass with administrator privileges
-		do shell script "defaults write com.jamfsoftware.jamf is_virtual_machine 0"
-		my logMsg("Jamf VM flag cleared (is_virtual_machine=0)")
+		do shell script "/usr/bin/defaults write /Library/Preferences/com.jamfsoftware.jamf.plist is_virtual_machine -bool false" user name localAdmin password adminPass with administrator privileges
+		my logMsg("Jamf VM flag cleared (is_virtual_machine=false, system-wide plist)")
 	end try
 
 	-- Authenticate with Jamf Pro
