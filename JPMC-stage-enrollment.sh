@@ -46,6 +46,10 @@ set -euo pipefail
 # off, LaunchAgent removal). Set to "1" only when everything is
 # working end-to-end. Leave "0" during testing.
 # =====================================================
+# Version of the JPMC enrollment script set. Kept in lockstep with
+# JPMC-setup-user.sh and JPMC-EC2-Enroll.applescript — bump all three
+# together on each release.
+readonly SCRIPT_VERSION="1.0.0"
 readonly SECRET_ID="mdmSecret"
 readonly PROD_FLAG="1"
 
@@ -69,7 +73,7 @@ readonly CLICLICK_SOURCE="brew"
 readonly ENROLL_SCRIPT="/Users/Shared/JPMC-EC2-Enroll.scpt"
 readonly LAUNCHAGENT_PLIST="/Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist"
 
-echo "$(/bin/date): JPMC-stage-enrollment started"
+echo "$(/bin/date): JPMC-stage-enrollment v${SCRIPT_VERSION} started"
 echo ""
 
 # --- Preflight checks ---

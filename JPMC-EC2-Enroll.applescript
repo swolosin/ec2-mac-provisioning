@@ -36,6 +36,12 @@
 -- SCRIPT-LEVEL CONSTANTS
 -- ============================================================
 
+-- Version of the JPMC enrollment script set. Kept in lockstep across
+-- JPMC-setup-user.sh, JPMC-stage-enrollment.sh, and this script — bump
+-- all three together on each release. Logged at startup and embedded in
+-- the ENROLLMENT_STATUS JSON so every instance is traceable to a version.
+property SCRIPT_VERSION : "1.0.0"
+
 -- Shell PATH used for every `do shell script` invocation that needs aws,
 -- curl, plutil, xmllint, etc. Broadest variant covers Homebrew installs
 -- at either /opt/homebrew (Apple Silicon default) or /usr/local (Intel/legacy).
@@ -527,10 +533,10 @@ on logFinalStatus(statusResult, instanceRegion, jamfURL, failReason)
 	end try
 	set statusJSON to ""
 	if statusResult is "SUCCESS" then
-		set statusJSON to "{\"status\":\"SUCCESS\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"mdm\":\"" & jamfURL & "\",\"action\":\"none\"}"
+		set statusJSON to "{\"status\":\"SUCCESS\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"mdm\":\"" & jamfURL & "\",\"script_version\":\"" & SCRIPT_VERSION & "\",\"action\":\"none\"}"
 		my logMsg("ENROLLMENT_STATUS: " & statusJSON)
 	else
-		set statusJSON to "{\"status\":\"FAILED\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"reason\":\"" & failReason & "\",\"action\":\"terminate_and_rebuild\"}"
+		set statusJSON to "{\"status\":\"FAILED\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"reason\":\"" & failReason & "\",\"script_version\":\"" & SCRIPT_VERSION & "\",\"action\":\"terminate_and_rebuild\"}"
 		my logMsg("ENROLLMENT_STATUS: " & statusJSON)
 	end if
 	-- Upload status directly to S3 so test pipeline can detect completion without SSM polling
@@ -553,7 +559,7 @@ on run argv
 	set settingsApp to "System Settings"
 	if macMajor < 13 then set settingsApp to "System Preferences"
 
-	my logMsg("=== JPMC-EC2-Enroll started | macOS " & macMajor & " ===")
+	my logMsg("=== JPMC-EC2-Enroll v" & SCRIPT_VERSION & " started | macOS " & macMajor & " ===")
 
 	-- Short-circuit if already enrolled
 	try
