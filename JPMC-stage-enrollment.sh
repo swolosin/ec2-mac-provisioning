@@ -103,7 +103,53 @@ echo "=== Phase 1: TCC Setup ==="
 
 readonly CLIENT="/usr/bin/osascript"
 readonly SYS_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-readonly USR_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+
+# -----------------------------------------------------------------
+# Locate the per-user TCC database.
+#
+# macOS 26 and earlier:  $HOME/Library/Application Support/com.apple.TCC/TCC.db
+# macOS 27 and later:    the file moved into a ProtectedSystem container at
+#   /private/var/containers/Data/ProtectedSystem/<UUID>/Data/Library/
+#       Application Support/com.apple.TCC/TCC.db
+#
+# The UUID is assigned per install, so it must never be hardcoded. Identify the
+# right container by its metadata instead: MCMMetadataIdentifier is
+# "com.apple.tccd" and MCMMetadataOwnership.uid is the target user's uid.
+# Verified on macOS 27.0 build 26A428 — lsof confirms the user tccd holds this
+# exact file open read-write, so it is the live store and not a stale copy.
+#
+# The metadata plist is root-owned mode 600, hence the sudo on plutil.
+# -----------------------------------------------------------------
+find_user_tcc_db() {
+  local uid="$1" d p ident owner
+  for d in /private/var/containers/Data/ProtectedSystem/*/; do
+    p="${d}.com.apple.containermanagerd.metadata.plist"
+    [[ -f "$p" ]] || continue
+    ident=$(/usr/bin/sudo /usr/bin/plutil -extract MCMMetadataIdentifier raw "$p" 2>/dev/null)
+    owner=$(/usr/bin/sudo /usr/bin/plutil -extract MCMMetadataOwnership.uid raw "$p" 2>/dev/null)
+    if [[ "$ident" == "com.apple.tccd" && "$owner" == "$uid" ]]; then
+      printf '%s' "${d}Data/Library/Application Support/com.apple.TCC/TCC.db"
+      return 0
+    fi
+  done
+  return 1
+}
+
+USR_DB=$(find_user_tcc_db "$(/usr/bin/id -u)" || true)
+if [[ -n "$USR_DB" && -f "$USR_DB" ]]; then
+  echo "User TCC DB (macOS 27+ container): $USR_DB"
+else
+  USR_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+  echo "User TCC DB (legacy path): $USR_DB"
+fi
+readonly USR_DB
+
+if [[ ! -f "$USR_DB" ]]; then
+  echo "ERROR: user TCC database not found at either location." >&2
+  echo "       Checked the ProtectedSystem containers and the legacy \$HOME path." >&2
+  echo "       Enrollment cannot drive System Settings without AppleEvents." >&2
+  exit 1
+fi
 
 readonly TARGETS=(
   "com.apple.systemevents:/System/Library/CoreServices/System Events.app"
@@ -125,12 +171,22 @@ csreq_hex() {
   /bin/rm -f "$tmp"
 }
 
+# INSERT OR REPLACE rather than plain INSERT. The access table's primary key is
+# (service, client, client_type, indirect_object_identifier), so a REPLACE
+# overwrites any pre-existing row for the same tuple — including a recorded
+# DENIAL (auth_value=0) that tccd may have written if something already tried
+# and failed. A plain INSERT would hit a constraint violation and, under
+# `set -euo pipefail`, abort the whole script.
+#
+# Columns are named explicitly so schema additions are tolerated. macOS 27 added
+# one_time_reprompt_eligible and reminder_count (19 columns vs 17 previously);
+# unnamed columns simply take their defaults.
 tcc_insert() {
   local db="$1" use_sudo="$2" service="$3" target="$4" client_hex="$5" target_hex="$6"
   local target_blob="NULL"
   [[ -n "$target_hex" ]] && target_blob="X'$target_hex'"
   ${use_sudo} /usr/bin/sqlite3 "$db" <<SQL
-INSERT INTO access (
+INSERT OR REPLACE INTO access (
   service, client, client_type, auth_value, auth_reason, auth_version,
   csreq, policy_id, indirect_object_identifier_type, indirect_object_identifier,
   indirect_object_code_identity, flags, last_modified,
@@ -180,6 +236,51 @@ echo ""
 echo "User DB osascript entries:"
 /usr/bin/sqlite3 -header -column "$USR_DB" \
   "SELECT service, auth_value, length(csreq) AS client_csreq, indirect_object_identifier AS target, length(indirect_object_code_identity) AS target_csreq FROM access WHERE client='$CLIENT';"
+
+# -----------------------------------------------------------------
+# Verify the grants actually landed, and FAIL if they did not.
+#
+# This block used to only print the tables above. Two problems with that:
+#   1. Nothing checked the result, so a silent TCC failure still let the
+#      pipeline continue and snapshot an AMI that could never enroll.
+#   2. jpmc-staging-check_ssm only surfaces stdout when the SSM command
+#      reports Failed. On success the tables were written and discarded, so
+#      the single most important signal was computed and thrown away.
+#
+# Failing loudly here means a TCC regression surfaces during staging, in
+# minutes, instead of as 20 identical enrollment failures hours later.
+# -----------------------------------------------------------------
+echo ""
+echo "Verifying TCC grants..."
+
+acc_ok=$(/usr/bin/sudo /usr/bin/sqlite3 "$SYS_DB" \
+  "SELECT COUNT(*) FROM access WHERE client='$CLIENT' AND service='kTCCServiceAccessibility' AND auth_value=2;")
+if [[ "$acc_ok" -lt 1 ]]; then
+  echo "ERROR: kTCCServiceAccessibility for $CLIENT is missing or not allowed in the system DB." >&2
+  echo "       Expected one row with auth_value=2, found $acc_ok." >&2
+  exit 1
+fi
+echo "  kTCCServiceAccessibility: OK"
+
+ae_ok=$(/usr/bin/sqlite3 "$USR_DB" \
+  "SELECT COUNT(*) FROM access WHERE client='$CLIENT' AND service='kTCCServiceAppleEvents' AND auth_value=2;")
+if [[ "$ae_ok" -lt 1 ]]; then
+  echo "ERROR: no allowed kTCCServiceAppleEvents rows for $CLIENT in the user DB." >&2
+  echo "       DB: $USR_DB" >&2
+  echo "       Without AppleEvents, osascript cannot drive System Settings." >&2
+  exit 1
+fi
+echo "  kTCCServiceAppleEvents: OK ($ae_ok target(s) allowed)"
+
+# A leftover auth_value=0 row for our own client would silently veto enrollment.
+denied=$(/usr/bin/sqlite3 "$USR_DB" \
+  "SELECT COUNT(*) FROM access WHERE client='$CLIENT' AND auth_value=0;")
+if [[ "$denied" -gt 0 ]]; then
+  echo "ERROR: found $denied DENIED row(s) for $CLIENT in the user DB." >&2
+  /usr/bin/sqlite3 -header -column "$USR_DB" \
+    "SELECT service, indirect_object_identifier, auth_value FROM access WHERE client='$CLIENT' AND auth_value=0;" >&2
+  exit 1
+fi
 
 echo ""
 echo "=== Phase 1 complete ==="

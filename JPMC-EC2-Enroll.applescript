@@ -13,7 +13,7 @@
 
 -- JPMC-EC2-Enroll.applescript
 -- Headless Jamf MDM enrollment for EC2 Mac instances
--- Supports: macOS 14 (Sonoma), 15 (Sequoia), 26 (Tahoe)
+-- Supports: macOS 14 (Sonoma), 15 (Sequoia), 26 (Tahoe), 27 (Golden Gate)
 --
 -- Key improvements over enroll-ec2-mac.scpt:
 --   - launchd xpc.activity gates the LaunchAgent until network is ready
@@ -260,7 +260,7 @@ on clickRowWithFallback(targetRow, settingsApp)
 end clickRowWithFallback
 
 -- ============================================================
--- PROFILE INSTALLATION — ALL macOS VERSIONS (14, 15, 26)
+-- PROFILE INSTALLATION — ALL macOS VERSIONS (14, 15, 26, 27)
 -- Navigation is identical across all versions:
 --   1. keystroke return dismisses the "Profile Downloaded" popup
 --   2. URL scheme navigates directly to Device Management
@@ -281,8 +281,11 @@ on installProfile(adminPass, localAdmin, settingsApp, macMajor)
 	delay 2
 
 	-- Dismiss popup and navigate to Device Management
-	-- macOS 15/26 show a "Profile Downloaded" popup — keystroke return dismisses it
+	-- macOS 15/26/27 show a "Profile Downloaded" popup — keystroke return dismisses it
 	-- macOS 14 has no popup, so we skip keystroke return
+	-- NOTE: this fires blind on anything that is not 14. If a future macOS drops
+	-- the popup, the Return lands on whatever has focus instead. Verified present
+	-- through 26; assumed for 27 until a real enrollment run confirms it.
 	my logMsg("Dismissing popup and navigating to Device Management...")
 	tell application settingsApp to activate
 	delay 0.5
@@ -295,12 +298,15 @@ on installProfile(adminPass, localAdmin, settingsApp, macMajor)
 	tell application settingsApp to activate
 	delay 1
 
-	-- Find profile row — fallback chain covers macOS 14, 15, and 26
+	-- Find profile row — fallback chain covers macOS 14, 15, 26, and 27.
+	-- The three paths are tried unconditionally, not gated on macMajor, so a new
+	-- macOS release works automatically if its hierarchy matches an existing one.
+	-- macOS 27 is expected to match the 26 path.
 	my logMsg("Waiting for MDM Profile row...")
 	set targetRow to missing value
 	repeat 20 times
 		try
-			-- Tahoe (macOS 26): outline in group 3
+			-- Tahoe (macOS 26) and Golden Gate (macOS 27): outline in group 3
 			tell application "System Events" to tell process settingsApp
 				tell outline 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 3 of splitter group 1 of group 1 of window 1
 					if (count of rows) >= 2 then set targetRow to row 2
