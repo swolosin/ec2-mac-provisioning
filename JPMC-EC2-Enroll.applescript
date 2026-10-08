@@ -260,6 +260,82 @@ on clickRowWithFallback(targetRow, settingsApp)
 end clickRowWithFallback
 
 -- ============================================================
+-- DISMISS THE INTERNAL-SSD DISK UNLOCK PROMPT
+--
+-- Some EC2 Mac dedicated hosts carry a FileVault-locked APFS volume group on
+-- the Mac mini's own internal SSD (disk0 -> container disk3), left behind by a
+-- previous tenancy. At every GUI login macOS tries to mount it, has no key,
+-- and SecurityAgent presents a modal:
+--
+--     "Enter a password to unlock the disk 'InternalDisk - Data'"
+--
+-- There is no password. The volume is not ours, is not in our AMI (which
+-- captures only /dev/sda1), and is not touched by any of our scripts.
+--
+-- It breaks enrollment two ways:
+--   1. The modal owns the foreground, so cliclick's physical clicks land on it
+--      instead of System Settings. Observed at 430x194 / (558,118), which
+--      covers the exact coordinates we target for the MDM Profile row.
+--   2. SecurityAgent serialises its auth sessions, so while this prompt holds
+--      one, our own profile-install password prompt can never come forward.
+--
+-- WHY DISMISSAL AND NOT PREVENTION:
+-- The obvious fix, an /etc/fstab "noauto" entry, does not work here. fstab is
+-- read by diskarbitrationd when it decides whether to mount a filesystem, but
+-- the FileVault unlock attempt happens upstream of that, so fstab is never
+-- consulted for an encrypted volume. AWS suggested fstab in case
+-- 178535629800759; it is the wrong mechanism for this disk. Deleting the volume
+-- is also out: diskutil apfs deleteVolume commonly fails with -69888 on locked
+-- volumes, and it would destroy host state we do not own.
+--
+-- Dismissing the dialog is the only guest-side option, and is what AWS's own
+-- team recommended on 2026-08-12. The real fix has to come from AWS clearing
+-- the volume during the Dedicated Host scrubbing workflow. Tracked in case
+-- 179140454500900.
+--
+-- SecurityAgent blocks accessibility enumeration of its own window contents
+-- (a deliberate anti-password-scraping measure), so "entire contents" returns
+-- empty and we cannot walk the hierarchy. We address the button by name, which
+-- does not require traversal, and fall back to Escape, which maps to Cancel on
+-- a standard modal.
+--
+-- Safe to call repeatedly. On a healthy host SecurityAgent has no window and
+-- this is a no-op.
+-- ============================================================
+
+on dismissDiskUnlockPrompt()
+	try
+		tell application "System Events"
+			if exists process "SecurityAgent" then
+				tell process "SecurityAgent"
+					if (count of windows) > 0 then
+						my logMsg("Disk unlock prompt detected — dismissing (internal SSD, not ours)")
+						try
+							click button "Cancel" of window 1
+							my logMsg("Disk unlock prompt cancelled")
+						on error
+							-- Escape maps to Cancel on a standard modal sheet.
+							key code 53
+							my logMsg("Disk unlock prompt dismissed via Escape")
+						end try
+						delay 1
+						-- Confirm it actually went away. If it did not, log it and
+						-- continue; installProfile will fail with a clear error
+						-- rather than silently clicking into the wrong window.
+						if (count of windows) > 0 then
+							my logMsg("WARNING: SecurityAgent still has a window after dismissal — host likely unusable for enrollment")
+						end if
+					end if
+				end tell
+			end if
+		end tell
+	on error errMsg
+		-- Never fatal. A failure here must not stop an otherwise healthy run.
+		my logMsg("WARNING: could not dismiss disk unlock prompt: " & errMsg)
+	end try
+end dismissDiskUnlockPrompt
+
+-- ============================================================
 -- PROFILE INSTALLATION — ALL macOS VERSIONS (14, 15, 26, 27)
 -- Navigation is identical across all versions:
 --   1. keystroke return dismisses the "Profile Downloaded" popup
@@ -275,6 +351,11 @@ on installProfile(adminPass, localAdmin, settingsApp, macMajor)
 	try
 		do shell script "launchctl bootout gui/$(id -u)/com.apple.DiagnosticsReporter 2>/dev/null || true"
 	end try
+
+	-- Defensive: clear the internal-SSD disk unlock prompt before we touch the UI.
+	-- Must happen before the first open/keystroke/cliclick, otherwise our input
+	-- lands on that modal instead of System Settings. See the handler above.
+	my dismissDiskUnlockPrompt()
 
 	my logMsg("Opening enrollment profile...")
 	do shell script "open /tmp/enrollmentProfile.mobileconfig"
@@ -402,6 +483,18 @@ end clickInstallButton
 -- ============================================================
 
 on enterAdminPassword(adminPass)
+	-- Re-clear the internal-SSD unlock prompt before we trust any SecurityAgent
+	-- window to be ours.
+	--
+	-- This matters: the wait loop below only tests that SecurityAgent HAS a
+	-- window. It cannot tell which dialog that window is. If the disk unlock
+	-- prompt is up, we would paste the ec2-user admin password into it and press
+	-- Return. That fails harmlessly (the password cannot unlock a volume we have
+	-- no key for) but the enrollment password never reaches the real prompt, the
+	-- profile install goes unauthenticated, and enrollment quietly does not
+	-- complete. Dismissing first means any window we find here is ours.
+	my dismissDiskUnlockPrompt()
+
 	-- Wait for SecurityAgent to present the password dialog
 	my logMsg("Waiting for SecurityAgent password dialog...")
 	set dialogReady to false

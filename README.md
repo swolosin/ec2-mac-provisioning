@@ -2,7 +2,7 @@
 
 Fully headless, automated Jamf MDM enrollment for EC2 Mac instances. Instances launched from the AMI enroll automatically at first GUI login with no human interaction required.
 
-Supports **macOS 14 (Sonoma)**, **macOS 15 (Sequoia)**, and **macOS 26 (Tahoe)**.
+Supports **macOS 14 (Sonoma)**, **macOS 15 (Sequoia)**, **macOS 26 (Tahoe)**, and **macOS 27 (Golden Gate)**.
 
 > **Origin:** This workflow was inspired by and built upon the AWS sample script `enroll-ec2-mac.scpt` (see `EC2_AWS_Build/`). The JPMC implementation rewrites the enrollment logic with IMDS retry, multi-version macOS support, persistent logging, cliclick fallback, S3 status reporting, and machine-readable status output for downstream AWS automation.
 
@@ -80,6 +80,8 @@ Instance launched from AMI
   • Retrieves all credentials from Secrets Manager
   • Authenticates with Jamf Pro via /api/oauth/token (OAuth client credentials)
   • Dismisses any "Your computer was restarted" dialog left by SIP-disable panic (bootout DiagnosticsReporter)
+  • Dismisses the internal-SSD disk unlock prompt if the host carries a
+    FileVault-locked volume group from a prior tenancy (see Troubleshooting)
   • Creates enrollment invitation via Jamf API
   • Builds .mobileconfig profile
   • Opens profile → on macOS 15/26, presses Return to dismiss "Profile Downloaded" popup (macOS 14 has no popup)
@@ -219,6 +221,41 @@ This is handled in two places:
 
 The combination means existing AMIs (with the panic file baked in) still enroll successfully via the runtime bootout, and new AMIs (built with the updated stage script) never have the file at all.
 
+### Internal-SSD disk unlock prompt ("Enter a password to unlock the disk")
+
+Some EC2 Mac dedicated hosts carry a **FileVault-locked APFS volume group on the Mac mini's own internal SSD** (`disk0` → container `disk3`), left behind by a previous tenancy. At every GUI login macOS attempts to mount it, has no key, and `SecurityAgent` presents a modal:
+
+```
+Enter a password to unlock the disk "InternalDisk - Data"
+```
+
+There is no password. The volume is not ours, is not in the AMI (which captures only `/dev/sda1`), and is not touched by any script in this repo.
+
+**Symptom:** enrollment repeatedly fails at `ERROR: Install button not found after 10 seconds` even though `MDM Profile found` succeeded moments earlier. Accessibility *queries* do not need foreground focus, so the row lookup works, but cliclick sends a **physical click** which lands on whatever owns the screen.
+
+**Two distinct failure modes:**
+
+1. The modal owns the foreground. Observed at 430x194 at position (558,118), which spans x 558-988 and y 118-312 — covering the exact coordinates targeted for the MDM Profile row.
+2. `SecurityAgent` serialises its authorization sessions. While this prompt holds one, the profile-install password prompt can never come forward.
+
+**Handling:** `JPMC-EC2-Enroll.applescript` calls `dismissDiskUnlockPrompt()` in two places — at the top of `installProfile` before any UI interaction, and again at the top of `enterAdminPassword`. The second call is not redundant: the wait loop there only tests that `SecurityAgent` *has* a window, not which dialog it is, so without it the admin password could be pasted into the unlock prompt instead of the install prompt.
+
+**Not fixable with `/etc/fstab`.** An `fstab` `noauto` entry does not suppress this. `fstab` is read by `diskarbitrationd` when deciding whether to mount a filesystem, but the FileVault unlock attempt happens *upstream* of that, so `fstab` is never consulted for an encrypted volume. AWS suggested this approach in case 178535629800759; it is the wrong mechanism for this disk. Deleting the volume is also not viable — `diskutil apfs deleteVolume` commonly returns `-69888` on locked volumes, and it would destroy host state we do not own.
+
+**Not hardware or OS specific.** Originally reported to AWS as M4-only, based on an M2 comparison that turned out to be a false negative. Reproduced since on `mac2.metal` (M1, `Macmini9,1`) running macOS 27.0, on a host from a batch that previously ran 20 consecutive clean builds. Both macOS 26 and 27 show it on some hosts and not others; both M1/M2 and M4 families appear on both sides. **The variable is the individual dedicated host.**
+
+The real fix has to come from AWS clearing the volume during the Dedicated Host scrubbing workflow, which their documentation states already erases the internal SSD. Tracked in **AWS case 179140454500900**. Dismissal is the only guest-side mitigation, and is what AWS's own team recommended on 2026-08-12.
+
+**Diagnosing a suspect host:**
+
+```bash
+diskutil apfs list | grep -E "FileVault:.*Yes \(Locked\)"
+lsappinfo list | grep -i "in front"
+log show --last 30m --predicate 'process == "SecurityAgent"' | grep -i unlockDisk
+```
+
+A `DUAuthMechanismPrompt unlockDiskWithUser:password:rememberPassword:` entry confirms it. `diskarbitrationd -d` writes verbose decisions to `/var/log/diskarbitrationd.log` if deeper detail is needed.
+
 ### Automatic retry — ThrottleInterval
 
 The LaunchAgent is also configured with `ThrottleInterval = 300` as a backstop. If the enrollment script exits with an error after launchd hands off (e.g. Jamf API unreachable, Secrets Manager auth fails), launchd automatically retries it every 5 minutes until it succeeds. You will see multiple `=== JPMC-EC2-Enroll started ===` entries in the log — this is expected behavior, not a problem. Once enrollment succeeds and prodFlag=1 cleanup runs, the LaunchAgent removes itself and retries stop.
@@ -260,6 +297,7 @@ Finder → ⌘K → `vnc://localhost` — log in as `ec2-user`.
 | `IMDS unavailable after 12 attempts (Xs elapsed)` | Real IMDS failure (network is already confirmed up by launchd before script fires) | Check elapsed time — if long, investigate IMDS service health. LaunchAgent will retry automatically every 5 minutes |
 | `Network interface not ready (scutil --nwi) — waiting...` | launchd fired the agent but interface flapped briefly | Defense-in-depth gate, will pass when interface returns. Should be rare |
 | `MDM Profile not found` | Profile popup not dismissed correctly | Check log for navigation step, kickstart to retry |
+| `Install button not found after 10 seconds`, with `MDM Profile found` logged just before | A modal owns the foreground, so cliclick's physical click misses System Settings. Usually the internal-SSD unlock prompt, or Setup Assistant on a first boot | See "Internal-SSD disk unlock prompt" above. Check `lsappinfo list \| grep -i "in front"` |
 | `cliclick failed on all paths` | cliclick binary missing from AMI | Re-stage — Phase 2 of stage script installs and caches it |
 
 ---
@@ -309,6 +347,8 @@ When `PROD_FLAG="1"` is set in the stage script, after successful enrollment the
 | Secret name fallback | Falls back to `"jamfSecret"` | Falls back to `"mdmSecret"`, logs warning |
 | Post-enrollment cleanup | Removes cliclick via brew | Removes entire `._jpmc-tools/` cache + script + LaunchAgent plist |
 | Panic dialog at boot | Blocks UI automation, no handling | Stage script clears `.panic` files pre-snapshot; enrollment script bootouts `DiagnosticsReporter` defensively at runtime |
+| Internal-SSD FileVault unlock prompt | Not handled — enrollment fails on affected hosts | `dismissDiskUnlockPrompt()` clears it before UI automation and again before password entry |
+| Per-user TCC database on macOS 27 | N/A | Stage script discovers the relocated ProtectedSystem container by metadata identity rather than a hardcoded UUID |
 | Secrets Manager JSON parsing | Python + `eval` + `shlex.quote` (shell anti-pattern flagged by SAST) | `plutil -extract raw` — Apple-native, no eval, no third-party deps |
 | Jamf authentication | Basic auth (deprecated in modern Jamf Pro) | OAuth client credentials via `/api/oauth/token`, parsed with `plutil` |
 | Jamf XML invitation parsing | Fragile text-item-delimiter string splitting | `xmllint --xpath` — native macOS, schema-aware |
