@@ -21,6 +21,8 @@
 #   - IMDS retry logic with --noproxy and elapsed-time logging
 #   - macOS 26 Device Management navigation (sidebarTarget crash)
 #   - cliclick cached locally so the AMI does not depend on Homebrew at boot
+#   - per-user Setup Assistant ("Buddy") suppressed via the loginwindow
+#     MiniBuddy gate plus a Setup Assistant pre-seed (Phase 7.5)
 #
 # Requirements:
 #   - Run as ec2-user (NOT root)
@@ -49,7 +51,7 @@ set -euo pipefail
 # Version of the JPMC enrollment script set. Kept in lockstep with
 # JPMC-setup-user.sh and JPMC-EC2-Enroll.applescript — bump all three
 # together on each release.
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly SECRET_ID="mdmSecret"
 readonly PROD_FLAG="1"
 
@@ -515,115 +517,107 @@ echo ""
 # Setup Assistant. It does nothing for the PER-USER Buddy flow, which is what
 # we hit.
 #
-# WHY TWO LAYERS
-# Layer 1 is Apple's documented mechanism, SkipSetupItems in the
-# com.apple.SetupAssistant.managed domain. Normally an MDM delivers it as a
-# com.apple.ManagedClient.preferences profile; ManagedClient then unwraps it to
-# /Library/Managed Preferences/. We cannot use MDM here (Buddy runs before
-# enrollment, and enrollment is the goal), so we write the unwrapped result
-# directly. That needs SIP disabled, which Phase 1 already relies on.
-# Pattern reference: rtrouton/profiles SkipWelcomeToMacSetup.mobileconfig.
+# WHAT WAS REMOVED HERE, AND WHY -- DO NOT PUT IT BACK
+# This phase used to carry a "Layer 1" that wrote SkipSetupItems into
+#     /Library/Managed Preferences/com.apple.SetupAssistant.managed.plist
+# That is Apple's documented mechanism, but it cannot work without MDM. It was
+# removed on 2026-10-08 after being disproved on i-0193db62a18036255.
+# ManagedClient owns that directory and prunes anything with no backing MDM
+# profile. After one boot the file was gone, /Library/Managed Preferences/ held
+# only the ec2-user subdirectory, and the system log showed:
+#     ManagedClient: Notifying CFPrefsD Of Updated Managed Preferences
+#     RemoveObsoleteBMAIDAccounts: checking against 0 MDM profiles
+# Zero profiles, so it reaps the file. Delivering it as a real configuration
+# profile instead is circular: that needs the MDM enrollment Buddy is blocking.
 #
-# Layer 2 exists because SkipSetupItems does not cover everything. The Liquid
-# Glass pane has NO skip key: the Setup Assistant binary on macOS 27.0.1
-# contains GlassSelection, GlassSelectionFlowItem, GlassSelectionViewController
-# and LastSeenGlassTintUpsellProductVersion, but no matching entry in the
-# skip-key vocabulary. Layer 2 pre-seeds the per-user com.apple.SetupAssistant
-# domain to mark every pane as already seen.
+# WHAT ACTUALLY WORKS -- three layers, in the order they take effect
 #
-# Layer 2 is NOT simply "set every DidSee* to 1". macOS 27 tracks panes two
-# different ways, and after manually walking all nine panes these were STILL 0:
-# DidSeeActivationLock, DidSeeAppStore, DidSeeApplePaySetup, DidSeeLockdownMode,
-# DidSeeSyncSetup, DidSeeSyncSetup2, DidSeeTermsOfAddress, DidSeeTouchIDSetup.
-# Several panes are instead gated on LastSeen*ProductVersion strings, which
-# re-trigger on every OS version bump. That is why an AMI built in September
-# still showed panes. Those values are therefore computed from sw_vers at
-# runtime rather than hardcoded, so a 27.1 or 28.0 AMI seeds itself correctly.
+# Layer A (below): delete MiniBuddyLaunch from the PER-USER
+#   com.apple.loginwindow domain. This is the gate loginwindow actually reads.
+#   Found in loginwindow's own log on 2026-10-08:
+#       -[Login1 miniBuddyOption]_block_invoke | NOT mbsetupuser, checking pref
+#       MiniBuddyLaunch pref is set, setting miniBuddyOption to
+#           kMinibuddyOptionMBPrefSet
+#       -[Login1 miniBuddyOption] | returning: 2
+#       A minibuddy option is set, calling startMiniBuddy
+#   After deleting the key, the same code path logged:
+#       MiniBuddyLaunch pref is NOT set
+#       -[Login1 miniBuddyOption] | returning: 0
+#   The gate works. It is necessary but NOT sufficient: Buddy still appeared
+#   once via a second launch path carrying no -MiniBuddyYes flag. That second
+#   path is why Layer C exists.
 #
-# UNTESTED as of 2026-10-08. Both layers written without a live box. Verify by
-# watching the pane sequence on a fresh instance from the resulting AMI.
+# Layer B (below): pre-seed the per-user com.apple.SetupAssistant domain so
+#   every pane is marked already-seen. Verified to survive the AMI snapshot --
+#   on a fresh instance every DidSee* read 1 and every version key read 27.0,
+#   including LastSeenGlassTintUpsellProductVersion.
+#
+#   Layer B is NOT simply "set every DidSee* to 1". macOS 27 tracks panes two
+#   different ways, and after manually walking all nine panes these were STILL
+#   0: DidSeeActivationLock, DidSeeAppStore, DidSeeApplePaySetup,
+#   DidSeeLockdownMode, DidSeeSyncSetup, DidSeeSyncSetup2, DidSeeTermsOfAddress,
+#   DidSeeTouchIDSetup. Several panes are gated instead on
+#   LastSeen*ProductVersion strings, which re-trigger on every OS version bump.
+#   That is why an AMI built in September still showed panes. Those values are
+#   computed from sw_vers at runtime so a 27.1 or 28.0 AMI seeds itself.
+#
+#   The Liquid Glass pane has NO SkipSetupItems key at all. The Setup Assistant
+#   binary on macOS 27.0.1 contains GlassSelection, GlassSelectionFlowItem,
+#   GlassSelectionViewController and LastSeenGlassTintUpsellProductVersion, but
+#   no matching entry in the skip-key vocabulary. Layer B is the only way to
+#   suppress it.
+#
+# Layer C (runtime, in JPMC-EC2-Enroll.applescript): quitSetupAssistant() runs
+#   at the top of installProfile and kills Buddy outright if it is on screen.
+#   This is the only layer verified to clear it unconditionally. Measured on
+#   i-0193db62a18036255: killall succeeded, process count went to 0, frontmost
+#   went to none, and it did NOT respawn. Layers A and B reduce how often C has
+#   to fire. C is what guarantees the screen is clear at the moment we click.
 # =====================================================
 
 echo "=== Phase 7.5: Suppress Setup Assistant ==="
 
-readonly MANAGED_PREFS_DIR="/Library/Managed Preferences"
-readonly SA_MANAGED_PLIST="${MANAGED_PREFS_DIR}/com.apple.SetupAssistant.managed.plist"
-
-# Values confirmed present in the macOS 27.0.1 Setup Assistant binary and
-# cross-checked against Apple's documented SkipSetupItems vocabulary.
-# Unrecognised keys are ignored, so a superset is safe and forward-compatible.
-# Organization* keys are deliberately excluded: those are Automated Device
-# Enrollment profile fields, not skip items.
-echo "Layer 1: writing SkipSetupItems managed preference..."
-/usr/bin/sudo /bin/mkdir -p "$MANAGED_PREFS_DIR"
-/usr/bin/sudo /usr/bin/tee "$SA_MANAGED_PLIST" > /dev/null <<'SAPLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>SkipSetupItems</key>
-	<array>
-		<string>Accessibility</string>
-		<string>AppStore</string>
-		<string>Appearance</string>
-		<string>AppleID</string>
-		<string>ApplePay</string>
-		<string>Biometric</string>
-		<string>DeviceToDeviceMigration</string>
-		<string>Diagnostics</string>
-		<string>DisplayTone</string>
-		<string>ExpressLanguage</string>
-		<string>FileVault</string>
-		<string>Intelligence</string>
-		<string>Keyboards</string>
-		<string>Location</string>
-		<string>OSShowcase</string>
-		<string>Payment</string>
-		<string>PreferredLanguage</string>
-		<string>Privacy</string>
-		<string>Registration</string>
-		<string>Restore</string>
-		<string>RestoreCompleted</string>
-		<string>ScreenSaver</string>
-		<string>ScreenTime</string>
-		<string>Siri</string>
-		<string>SoftwareUpdate</string>
-		<string>SpokenLanguage</string>
-		<string>TOS</string>
-		<string>TapToSetup</string>
-		<string>TermsOfAddress</string>
-		<string>TouchID</string>
-		<string>TrueTone</string>
-		<string>UnlockWithWatch</string>
-		<string>Update</string>
-		<string>UpdateCompleted</string>
-		<string>Wallpaper</string>
-		<string>WatchMigration</string>
-		<string>Welcome</string>
-		<string>iCloudDiagnostics</string>
-		<string>iCloudStorage</string>
-	</array>
-</dict>
-</plist>
-SAPLIST
-/usr/bin/sudo /usr/sbin/chown root:wheel "$SA_MANAGED_PLIST"
-/usr/bin/sudo /bin/chmod 644 "$SA_MANAGED_PLIST"
-
-if /usr/bin/plutil -lint "$SA_MANAGED_PLIST" > /dev/null 2>&1; then
-  echo "  managed preference written and valid: $SA_MANAGED_PLIST"
-else
-  echo "ERROR: $SA_MANAGED_PLIST is not a valid plist" >&2
-  exit 1
-fi
-
-# Layer 2: pre-seed the per-user domain. Version-keyed values are computed from
-# the running OS so this stays correct across point releases.
-echo "Layer 2: pre-seeding com.apple.SetupAssistant for $(/usr/bin/id -un)..."
+SA_USER=$(/usr/bin/id -un)
 SA_PRODUCT_VERSION=$(/usr/bin/sw_vers -productVersion)
 SA_BUILD_VERSION=$(/usr/bin/sw_vers -buildVersion)
+echo "  user:       ${SA_USER}"
 echo "  running OS: ${SA_PRODUCT_VERSION} (${SA_BUILD_VERSION})"
+echo ""
 
-# Boolean DidSee* flags. Covers the panes that are tracked as simple booleans.
+# -----------------------------------------------------
+# Layer A: the loginwindow MiniBuddy gate
+#
+# MiniBuddyLaunch lives in the PER-USER com.apple.loginwindow domain, not in
+# com.apple.SetupAssistant, which is why earlier versions of this phase never
+# touched it and Buddy launched anyway.
+#
+# `defaults delete` on an absent key exits non-zero, so `|| true` is required
+# under `set -euo pipefail`.
+#
+# The counters are belt-and-braces. loginwindow consults them when
+# MiniBuddyLaunch is absent to decide whether a relaunch is still owed; a high
+# value reads as "already launched plenty of times".
+# -----------------------------------------------------
+echo "Layer A: clearing the loginwindow MiniBuddy gate..."
+/usr/bin/defaults delete com.apple.loginwindow MiniBuddyLaunch 2>/dev/null || true
+/usr/bin/defaults write com.apple.loginwindow MiniBuddyLaunchCount -int 99
+/usr/bin/defaults write com.apple.SetupAssistant MiniBuddyRelaunchCounter -int 99
+
+# Fail loudly. If this key survives, every instance from this AMI stalls at
+# Buddy's primary launch path and Layer C has to carry the whole load.
+if /usr/bin/defaults read com.apple.loginwindow MiniBuddyLaunch > /dev/null 2>&1; then
+  echo "ERROR: MiniBuddyLaunch still present in com.apple.loginwindow" >&2
+  exit 1
+fi
+echo "  MiniBuddyLaunch absent, relaunch counters set."
+echo ""
+
+# -----------------------------------------------------
+# Layer B: pre-seed the per-user Setup Assistant domain
+# -----------------------------------------------------
+echo "Layer B: pre-seeding com.apple.SetupAssistant for ${SA_USER}..."
+
+# Boolean DidSee* flags. Covers the panes tracked as simple booleans.
 for sa_key in \
   DidSeeAccessibility DidSeeActivationLock DidSeeAppStore DidSeeAppearanceSetup \
   DidSeeApplePaySetup DidSeeCloudSetup DidSeeLockdownMode DidSeePrivacy \
@@ -662,20 +656,21 @@ done
 echo "  pre-seed written."
 echo ""
 echo "Setup Assistant state after seeding:"
+# `grep -c` exits non-zero when the count is 0, and under `set -o pipefail` that
+# would abort the whole script on what is only an informational line. The
+# real check is the hard gate immediately below.
 /usr/bin/defaults read com.apple.SetupAssistant 2>/dev/null | /usr/bin/grep -cE "DidSee|LastSeen|Skip" \
-  | /usr/bin/awk '{print "  " $1 " keys set"}'
+  | /usr/bin/awk '{print "  " $1 " keys set"}' || true
 
-# Fail loudly if neither layer landed. A silent miss here means every instance
-# from this AMI stalls at Buddy and enrollment never runs.
-if [[ ! -f "$SA_MANAGED_PLIST" ]]; then
-  echo "ERROR: Setup Assistant managed preference missing after write" >&2
-  exit 1
-fi
+# Fail loudly if the pre-seed did not land. A silent miss means every instance
+# from this AMI shows panes again.
 if ! /usr/bin/defaults read com.apple.SetupAssistant DidSeeAccessibility > /dev/null 2>&1; then
   echo "ERROR: com.apple.SetupAssistant pre-seed did not persist" >&2
   exit 1
 fi
 
+echo ""
+echo "  Layer C (runtime killall) lives in JPMC-EC2-Enroll.applescript."
 echo ""
 echo "=== Phase 7.5 complete ==="
 echo ""

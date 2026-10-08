@@ -37,7 +37,7 @@ set -euo pipefail
 # Version of the JPMC enrollment script set. Kept in lockstep with
 # JPMC-stage-enrollment.sh and JPMC-EC2-Enroll.applescript — bump all
 # three together on each release.
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly SECRET_ID="mdmSecret"
 
 echo "$(/bin/date): JPMC-setup-user v${SCRIPT_VERSION} started"

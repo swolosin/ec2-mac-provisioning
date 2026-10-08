@@ -14,6 +14,8 @@
 -- JPMC-EC2-Enroll.applescript
 -- Headless Jamf MDM enrollment for EC2 Mac instances
 -- Supports: macOS 14 (Sonoma), 15 (Sequoia), 26 (Tahoe), 27 (Golden Gate)
+-- macOS 14/15/26 are validated at 20/20. macOS 27 enrollment has succeeded
+-- end-to-end on mac2-m2pro.metal; see README for the open items on 27.
 --
 -- Key improvements over enroll-ec2-mac.scpt:
 --   - launchd xpc.activity gates the LaunchAgent until network is ready
@@ -24,6 +26,14 @@
 --     (handles "Computer was restarted" dialog left by SIP-disable panic)
 --   - plutil + xmllint for JSON/XML parsing (native macOS, no Python eval)
 --   - Timestamped logging to /Library/Logs/JPMC/
+--   - Dismisses the internal-SSD FileVault unlock prompt that some dedicated
+--     hosts present at every login (AWS case 179140454500900)
+--   - Quits per-user Setup Assistant ("Buddy") before driving the UI, since it
+--     holds the foreground and physical clicks would land on it
+--   - Clicks the NEWEST downloaded profile rather than a stale one left behind
+--     by an earlier failed attempt
+--   - Top-level error handler, so an unhandled error still reports
+--     ENROLLMENT_STATUS instead of leaving the pipeline polling forever
 --
 -- Configuration:
 --   defaults write com.jpmc.ec2.mdm.enrollment MMSecret "your-secret-id"
@@ -40,12 +50,67 @@
 -- JPMC-setup-user.sh, JPMC-stage-enrollment.sh, and this script — bump
 -- all three together on each release. Logged at startup and embedded in
 -- the ENROLLMENT_STATUS JSON so every instance is traceable to a version.
-property SCRIPT_VERSION : "1.0.0"
+property SCRIPT_VERSION : "1.1.0"
 
 -- Shell PATH used for every `do shell script` invocation that needs aws,
 -- curl, plutil, xmllint, etc. Broadest variant covers Homebrew installs
 -- at either /opt/homebrew (Apple Silicon default) or /usr/local (Intel/legacy).
 property AWS_PATH : "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin"
+
+-- Run context, captured as it becomes known so the top-level error handler in
+-- `on run` can still report region and MDM URL when something throws before
+-- logFinalStatus would normally be reached. If a failure happens before these
+-- are set, the status object honestly reports "unknown" rather than guessing.
+property RUN_REGION : "unknown"
+property RUN_JAMF_URL : "unknown"
+
+-- Holds the local admin password for the duration of the run, for one reason
+-- only: so the error handler can scrub it out of an AppleScript error message
+-- before that message reaches the log and the S3 status object. `do shell
+-- script` failures can echo the failing command, and some of those commands
+-- carry the password. Never written to disk, because osascript does not save
+-- properties back into the compiled .scpt. Cleared when the run ends.
+property RUN_ADMIN_PASS : ""
+
+-- ============================================================
+-- TEXT HELPERS
+-- Plain AppleScript string utilities. Used by the logging and status paths,
+-- so they are defined before anything that might need to report an error.
+-- ============================================================
+
+on replaceText(theText, searchStr, replaceStr)
+	if searchStr is "" then return theText
+	set savedDelims to AppleScript's text item delimiters
+	set AppleScript's text item delimiters to searchStr
+	set theParts to text items of theText
+	set AppleScript's text item delimiters to replaceStr
+	set theResult to theParts as text
+	set AppleScript's text item delimiters to savedDelims
+	return theResult
+end replaceText
+
+-- Remove anything secret from a string before it is logged or uploaded.
+-- Currently just the local admin password, which is the only secret that can
+-- end up inside a `do shell script` error message.
+on scrubSecrets(msg)
+	set out to msg as text
+	if RUN_ADMIN_PASS is not "" then
+		set out to my replaceText(out, RUN_ADMIN_PASS, "***REDACTED***")
+	end if
+	return out
+end scrubSecrets
+
+-- Escape a string for embedding in the ENROLLMENT_STATUS JSON. Error text can
+-- contain quotes, backslashes and newlines, any of which would produce invalid
+-- JSON that the pipeline could not parse.
+on jsonEscape(s)
+	set out to my replaceText(s as text, "\\", "\\\\")
+	set out to my replaceText(out, "\"", "\\\"")
+	set out to my replaceText(out, tab, " ")
+	set out to my replaceText(out, return, " ")
+	set out to my replaceText(out, linefeed, " ")
+	return out
+end jsonEscape
 
 -- ============================================================
 -- LOGGING
@@ -336,6 +401,79 @@ on dismissDiskUnlockPrompt()
 end dismissDiskUnlockPrompt
 
 -- ============================================================
+-- QUIT SETUP ASSISTANT ("BUDDY")
+--
+-- THE PROBLEM
+-- On a fresh AMI boot the per-user Setup Assistant presents a nine-pane wizard
+-- and holds the foreground as com.apple.SetupAssistant. cliclick sends PHYSICAL
+-- clicks, which land on whatever owns the screen, so the profile row click goes
+-- to Buddy instead of System Settings. The symptom is always the same pair of
+-- log lines: "MDM Profile found" succeeds, because accessibility queries do not
+-- need focus, then "Install button not found after 10 seconds" fails, because
+-- the click did.
+--
+-- WHY WE KILL IT RATHER THAN SUPPRESS IT
+-- Phase 7.5 of JPMC-stage-enrollment.sh clears the loginwindow MiniBuddyLaunch
+-- gate (Layer A) and pre-seeds every pane as already-seen (Layer B). Both were
+-- verified, and both help, but on 2026-10-08 Buddy still appeared on
+-- i-0193db62a18036255 through a second launch path that carries no
+-- -MiniBuddyYes flag and has not been identified. Killing it here sidesteps the
+-- need to find every launch path: whatever started it, it is gone before we
+-- click.
+--
+-- Measured on that instance: killall succeeded, process count went to 0,
+-- frontmost went to none, and it did NOT respawn.
+--
+-- `quit` via Apple events is not used. Buddy reasserts frontmostness
+-- ("reasserting frontmostness for MiniBuddy!" appears in its log) and does not
+-- honour a polite quit. killall is blunt and it works.
+--
+-- Nothing of value is lost. There is no Apple ID on these instances, no user to
+-- onboard, and /var/db/.AppleSetupDone already marks device setup complete.
+--
+-- Safe to call repeatedly. On an instance where Layers A and B did their job
+-- Buddy is not running and this is a no-op.
+-- ============================================================
+
+on quitSetupAssistant()
+	set saRunning to false
+	try
+		tell application "System Events"
+			if exists process "Setup Assistant" then set saRunning to true
+		end tell
+	on error errMsg
+		-- If we cannot even query the process list, say so and carry on. A
+		-- failure here must not stop an otherwise healthy run.
+		my logMsg("WARNING: could not check for Setup Assistant: " & errMsg)
+		return
+	end try
+
+	if not saRunning then return
+
+	my logMsg("Setup Assistant is running and owns the foreground - quitting it")
+	try
+		do shell script "/usr/bin/killall 'Setup Assistant' 2>/dev/null || true"
+	on error errMsg
+		my logMsg("WARNING: killall Setup Assistant failed: " & errMsg)
+	end try
+
+	-- Confirm. If it comes back we want that in the log, because it means the
+	-- second launch path is respawning it and the click is about to fail.
+	delay 2
+	set stillRunning to false
+	try
+		tell application "System Events"
+			if exists process "Setup Assistant" then set stillRunning to true
+		end tell
+	end try
+	if stillRunning then
+		my logMsg("WARNING: Setup Assistant respawned after killall - clicks may land on it")
+	else
+		my logMsg("Setup Assistant quit - foreground is clear")
+	end if
+end quitSetupAssistant
+
+-- ============================================================
 -- PROFILE INSTALLATION — ALL macOS VERSIONS (14, 15, 26, 27)
 -- Navigation is identical across all versions:
 --   1. keystroke return dismisses the "Profile Downloaded" popup
@@ -356,6 +494,12 @@ on installProfile(adminPass, localAdmin, settingsApp, macMajor)
 	-- Must happen before the first open/keystroke/cliclick, otherwise our input
 	-- lands on that modal instead of System Settings. See the handler above.
 	my dismissDiskUnlockPrompt()
+
+	-- Defensive: Buddy owns the foreground if it is up, and cliclick sends
+	-- physical clicks. Must run before the first open/keystroke/cliclick for the
+	-- same reason as dismissDiskUnlockPrompt above. See the handler for why this
+	-- is a kill rather than a suppression.
+	my quitSetupAssistant()
 
 	my logMsg("Opening enrollment profile...")
 	do shell script "open /tmp/enrollmentProfile.mobileconfig"
@@ -383,32 +527,63 @@ on installProfile(adminPass, localAdmin, settingsApp, macMajor)
 	-- The three paths are tried unconditionally, not gated on macMajor, so a new
 	-- macOS release works automatically if its hierarchy matches an existing one.
 	-- macOS 27 is expected to match the 26 path.
+	--
+	-- WHY THE LAST ROW AND NOT ROW 2
+	-- Row 1 is the "Downloaded" section header, so the profiles start at row 2.
+	-- This used to hardcode row 2, which is correct only on the first attempt.
+	-- Every `open` of a .mobileconfig appends another entry to the Downloaded
+	-- list and nothing removes the old ones, so after a failed attempt the list
+	-- grows. Measured on i-0193db62a18036255 after nine attempts: 3 rows, being
+	-- the header plus two "MDM Profile" entries both reading "Profile not
+	-- installed. Double-click to review." Row 2 was therefore the OLDEST
+	-- download, carrying a spent enrollment invitation, while the profile this
+	-- run just created sat at the bottom. The last row is the one we wrote.
+	--
+	-- The row count is logged below so the next run tells us plainly how many
+	-- stale downloads had accumulated.
 	my logMsg("Waiting for MDM Profile row...")
 	set targetRow to missing value
+	set rowsSeen to 0
 	repeat 20 times
 		try
 			-- Tahoe (macOS 26) and Golden Gate (macOS 27): outline in group 3
 			tell application "System Events" to tell process settingsApp
 				tell outline 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 3 of splitter group 1 of group 1 of window 1
-					if (count of rows) >= 2 then set targetRow to row 2
+					set rowsSeen to count of rows
+					if rowsSeen >= 2 then set targetRow to row rowsSeen
 				end tell
 			end tell
 		end try
-		try
-			-- Sequoia 15.0/15.1: outline in group 2
-			tell application "System Events" to tell process settingsApp
-				get value of static text 1 of UI element 1 of row 2 of outline 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
-				set targetRow to row 2 of outline 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
-			end tell
-		end try
-		try
-			-- Sonoma (macOS 14): table in group 2 of scroll area
-			tell application "System Events" to tell process settingsApp
-				tell table 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
-					if (count of rows) >= 2 then set targetRow to row 2
+		-- First matching path wins. The guards matter now that rowsSeen is shared
+		-- state: without them a later path could overwrite the row count that the
+		-- path which actually matched had already set, and the log would lie.
+		if targetRow is missing value then
+			try
+				-- Sequoia 15.0/15.1: outline in group 2
+				tell application "System Events" to tell process settingsApp
+					tell outline 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
+						set rowsSeen to count of rows
+						if rowsSeen >= 2 then
+							-- Probe that it really is a profile row before committing to
+							-- it. If this raises, the enclosing try moves to the next path.
+							get value of static text 1 of UI element 1 of row rowsSeen
+							set targetRow to row rowsSeen
+						end if
+					end tell
 				end tell
-			end tell
-		end try
+			end try
+		end if
+		if targetRow is missing value then
+			try
+				-- Sonoma (macOS 14): table in group 2 of scroll area
+				tell application "System Events" to tell process settingsApp
+					tell table 1 of scroll area 1 of group 2 of scroll area 1 of group 1 of group 2 of splitter group 1 of group 1 of window 1
+						set rowsSeen to count of rows
+						if rowsSeen >= 2 then set targetRow to row rowsSeen
+					end tell
+				end tell
+			end try
+		end if
 		if targetRow is not missing value then exit repeat
 		delay 0.5
 	end repeat
@@ -417,7 +592,7 @@ on installProfile(adminPass, localAdmin, settingsApp, macMajor)
 		my logMsg("ERROR: MDM Profile row not found after 10 seconds")
 		error "MDM Profile row not found"
 	end if
-	my logMsg("MDM Profile found — opening install sheet...")
+	my logMsg("MDM Profile found - using the newest of " & (rowsSeen - 1) & " downloaded profile(s) - opening install sheet...")
 
 	my clickRowWithFallback(targetRow, settingsApp)
 	my clickInstallButton(settingsApp)
@@ -432,9 +607,28 @@ end installProfile
 
 on clickInstallButton(settingsApp)
 	tell application "System Events" to tell process settingsApp
-		-- First Install button
+		-- First Install button.
+		--
+		-- The three named paths are tried first, on every attempt, and are
+		-- unchanged. They are what macOS 14, 15 and 26 pass 20/20 with.
+		--
+		-- From attempt 11 onward a whole-window sweep is added as a last resort.
+		-- It is deliberately NOT run on the early attempts: `entire contents`
+		-- walks the full accessibility tree, which on the Device Management pane
+		-- means the 39-row sidebar as well, and doing that twenty times would
+		-- stretch this loop far past its nominal 10 seconds and slow down the
+		-- versions that already work.
+		--
+		-- The sweep exists because the second path below,
+		-- `button "Install…" of scroll area 1 of window 1`, provably cannot match
+		-- on macOS 27. An accessibility dump of the Device Management pane on
+		-- 27.0 (26A428) shows the content scroll area nested six levels down:
+		--   window 1 > group 1 > splitter group 1 > group 3 > group 1 >
+		--   scroll area 1
+		-- so `scroll area 1 of window 1` resolves to nothing there. The path is
+		-- kept because it is the one that matches on macOS 14 and 15.
 		set clicked to false
-		repeat 20 times
+		repeat with installAttempt from 1 to 20
 			try
 				click button "Install" of sheet 1 of window 1
 				set clicked to true
@@ -450,9 +644,33 @@ on clickInstallButton(settingsApp)
 				set clicked to true
 				exit repeat
 			end try
+			if installAttempt > 10 then
+				try
+					repeat with el in (entire contents of window 1)
+						if (role of el) as text is "AXButton" then
+							set elName to ""
+							try
+								set elName to (name of el) as text
+							end try
+							if elName is "Install" or elName is "Install…" or elName is "Install..." then
+								click el
+								my logMsg("Install button located by whole-window sweep")
+								set clicked to true
+								exit repeat
+							end if
+						end if
+					end repeat
+				end try
+				if clicked then exit repeat
+			end if
 			delay 0.5
 		end repeat
 		if not clicked then
+			-- Wording kept verbatim. Every historical log, the README
+			-- troubleshooting table and the pipeline's failure triage all key off
+			-- this exact string. With the sweep running on the later attempts the
+			-- real elapsed time can exceed 10 seconds; the message is a stable
+			-- identifier, not a measurement.
 			my logMsg("ERROR: Install button not found after 10 seconds")
 			error "Install button not found after 10 seconds"
 		end if
@@ -494,6 +712,12 @@ on enterAdminPassword(adminPass)
 	-- profile install goes unauthenticated, and enrollment quietly does not
 	-- complete. Dismissing first means any window we find here is ours.
 	my dismissDiskUnlockPrompt()
+
+	-- Same reasoning for Buddy. If Setup Assistant respawned between the profile
+	-- row click and here, it would hold the foreground while we type the admin
+	-- password, and the keystrokes would go to it instead of SecurityAgent.
+	-- Normally a no-op, because installProfile already cleared it.
+	my quitSetupAssistant()
 
 	-- Wait for SecurityAgent to present the password dialog
 	my logMsg("Waiting for SecurityAgent password dialog...")
@@ -625,6 +849,10 @@ end runCleanup
 -- ============================================================
 
 on logFinalStatus(statusResult, instanceRegion, jamfURL, failReason)
+	-- failReason can carry raw AppleScript error text, which may contain quotes,
+	-- backslashes or newlines. Escape it or the pipeline gets invalid JSON it
+	-- cannot parse, and a failure would look like no status at all.
+	set safeReason to my jsonEscape(my scrubSecrets(failReason))
 	set instanceID to "unknown"
 	try
 		-- Reuse imdsGet so we get retry, --noproxy, and elapsed timing for free
@@ -635,7 +863,7 @@ on logFinalStatus(statusResult, instanceRegion, jamfURL, failReason)
 		set statusJSON to "{\"status\":\"SUCCESS\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"mdm\":\"" & jamfURL & "\",\"script_version\":\"" & SCRIPT_VERSION & "\",\"action\":\"none\"}"
 		my logMsg("ENROLLMENT_STATUS: " & statusJSON)
 	else
-		set statusJSON to "{\"status\":\"FAILED\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"reason\":\"" & failReason & "\",\"script_version\":\"" & SCRIPT_VERSION & "\",\"action\":\"terminate_and_rebuild\"}"
+		set statusJSON to "{\"status\":\"FAILED\",\"instance\":\"" & instanceID & "\",\"region\":\"" & instanceRegion & "\",\"reason\":\"" & safeReason & "\",\"script_version\":\"" & SCRIPT_VERSION & "\",\"action\":\"terminate_and_rebuild\"}"
 		my logMsg("ENROLLMENT_STATUS: " & statusJSON)
 	end if
 	-- Upload status directly to S3 so test pipeline can detect completion without SSM polling
@@ -650,7 +878,10 @@ end logFinalStatus
 -- MAIN
 -- ============================================================
 
-on run argv
+-- The whole enrollment flow. Called only by `on run` below, which wraps it so
+-- that nothing can escape without writing a status. Kept as its own handler
+-- purely so that wrapper can exist.
+on runEnrollment()
 	-- Detect macOS version
 	set AppleScript's text item delimiters to "."
 	set macMajor to (text item 1 of system version of (system info)) as integer
@@ -676,6 +907,7 @@ on run argv
 	-- Get region with retry (key fix for boot-time IMDS failure)
 	my logMsg("Getting instance region...")
 	set instanceRegion to my imdsGet("placement/region")
+	set RUN_REGION to instanceRegion
 	my logMsg("Region: " & instanceRegion)
 
 	-- Retrieve credentials from Secrets Manager
@@ -685,6 +917,9 @@ on run argv
 	set mdmPass to my getSecret(instanceRegion, secretID, "mdmEnrollmentPassword")
 	set localAdmin to my getSecret(instanceRegion, secretID, "localAdmin")
 	set adminPass to my getSecret(instanceRegion, secretID, "localAdminPassword")
+	-- Held only so the error handler in `on run` can redact it out of error
+	-- text. See the RUN_ADMIN_PASS property comment.
+	set RUN_ADMIN_PASS to adminPass
 	my logMsg("All credentials retrieved.")
 
 	-- Normalize Jamf URL
@@ -694,6 +929,7 @@ on run argv
 		set jamfURL to "https://" & mdmDomain
 	end if
 	if not (jamfURL ends with "/") then set jamfURL to jamfURL & "/"
+	set RUN_JAMF_URL to jamfURL
 	my logMsg("Jamf URL: " & jamfURL)
 
 	-- Set Jamf VM flag so EC2 Mac is not treated as a VM in Jamf records.
@@ -747,4 +983,47 @@ on run argv
 		my logMsg("=== JPMC-EC2-Enroll: FAILED — enrollment did not complete. Check /Library/Logs/JPMC/EC2-Enroll.log and Jamf Pro ===")
 		my logFinalStatus("FAILED", instanceRegion, jamfURL, "enrollment did not complete within 5 minutes")
 	end if
+end runEnrollment
+
+-- ============================================================
+-- MAIN ENTRY POINT
+--
+-- WHY THIS WRAPPER EXISTS
+-- Every path through runEnrollment is supposed to end in logFinalStatus, which
+-- writes the ENROLLMENT_STATUS line and uploads the status object to S3. An
+-- uncaught AppleScript error skipped all of that: no status line, no S3 object,
+-- and nothing in the staging state machine has a timeout, so its
+-- test_wait_enrollment step would poll until something external intervened.
+-- Observed on 2026-10-08, a run that errored out early sat for 27 minutes
+-- holding a dedicated host.
+--
+-- With this wrapper, a crash is reported the same way a clean failure is, and
+-- the pipeline can terminate and rebuild on its own.
+--
+-- The error is re-raised afterwards so osascript still exits non-zero and the
+-- "execution error" line still appears in the log. The LaunchAgent retries on
+-- its own ThrottleInterval either way; this only changes what gets reported,
+-- not the retry behaviour.
+-- ============================================================
+
+on run argv
+	try
+		my runEnrollment()
+	on error errMsg number errNum
+		-- Scrub before anything else: error text from `do shell script` can echo
+		-- the failing command, and some of those commands carry the admin
+		-- password. Nothing unscrubbed may reach the log or S3.
+		set safeMsg to my scrubSecrets(errMsg as text)
+		my logMsg("=== JPMC-EC2-Enroll: ABORTED - unhandled error " & errNum & ": " & safeMsg & " ===")
+		try
+			my logFinalStatus("FAILED", RUN_REGION, RUN_JAMF_URL, "unhandled error " & errNum & ": " & safeMsg)
+		on error statusErr
+			-- If even status reporting fails the pipeline is blind, so make sure
+			-- the local log records why.
+			my logMsg("CRITICAL: logFinalStatus failed after an unhandled error: " & statusErr)
+		end try
+		set RUN_ADMIN_PASS to ""
+		error safeMsg number errNum
+	end try
+	set RUN_ADMIN_PASS to ""
 end run

@@ -12,15 +12,14 @@ Supports **macOS 14 (Sonoma)**, **macOS 15 (Sequoia)**, **macOS 26 (Tahoe)**, an
 
 ```
 /
-├── JPMC-setup-user.sh           # Step 1 — run via SSM on new instance
-├── JPMC-stage-enrollment.sh     # Step 3 — run via SSM after SIP disable
-├── JPMC-EC2-Enroll.applescript  # Compiled and installed by stage script
-├── com.apple.SetupAssistant.managed.plist
-│                                # Standalone copy of the SkipSetupItems managed
-│                                # preference, for manual testing. The stage
-│                                # script writes this inline in Phase 7.5
-└── EC2_AWS_Build/               # Original AWS scripts (reference only)
+├── JPMC-setup-user.sh           # Step 1 — run as ec2-user via SSM on a new instance
+├── JPMC-stage-enrollment.sh     # Step 3 — run as ec2-user via SSM after SIP disable
+├── JPMC-EC2-Enroll.applescript  # Step 4 — downloaded and compiled by the stage script
+├── jpmc_pwpolicy.sh             # Password policy helper (standalone, optional)
+└── EC2_AWS_Build/               # Original AWS sample scripts (reference only)
 ```
+
+All three numbered scripts carry the same `SCRIPT_VERSION` and are bumped together. Current version: **1.1.0**.
 
 ---
 
@@ -50,9 +49,9 @@ JPMC-stage-enrollment.sh
   • Downloads JPMC-EC2-Enroll.applescript from GitHub, compiles to .scpt
   • Writes MMSecret + prodFlag to defaults
   • Writes LaunchAgent plist directly to /Library/LaunchAgents/
-  • Suppresses per-user Setup Assistant two ways: writes the SkipSetupItems
-    managed preference, and pre-seeds com.apple.SetupAssistant with version
-    values computed from sw_vers (see Troubleshooting)
+  • Suppresses per-user Setup Assistant: clears the loginwindow MiniBuddyLaunch
+    gate and pre-seeds com.apple.SetupAssistant with version values computed
+    from sw_vers (see Troubleshooting)
   • Disables RandomizePassword in ec2-macos-init
   • Clears ec2-macos-init instance history
   • Clears /Library/Logs/DiagnosticReports/ panic + ips files so the AMI
@@ -89,15 +88,17 @@ Instance launched from AMI
   • Dismisses any "Your computer was restarted" dialog left by SIP-disable panic (bootout DiagnosticsReporter)
   • Dismisses the internal-SSD disk unlock prompt if the host carries a
     FileVault-locked volume group from a prior tenancy (see Troubleshooting)
+  • Quits per-user Setup Assistant if it is still on screen (see Troubleshooting)
   • Creates enrollment invitation via Jamf API
   • Builds .mobileconfig profile
   • Opens profile → on macOS 15/26, presses Return to dismiss "Profile Downloaded" popup (macOS 14 has no popup)
   • Navigates to Device Management via URL scheme (works on all macOS versions)
-  • Finds MDM Profile row by name, double-clicks with cliclick
+  • Finds the NEWEST downloaded MDM Profile row, double-clicks with cliclick
   • Clicks Install → enters admin password into SecurityAgent
   • Polls for enrollment confirmation (up to 5 minutes)
   • Enables screen sharing
-  • Writes ENROLLMENT_STATUS JSON to log
+  • Writes ENROLLMENT_STATUS JSON to log (also on an unhandled error, so the
+    pipeline is never left polling a run that already died)
   • Uploads enrollment status directly to S3
   • Runs cleanup if prodFlag = 1
         │
@@ -136,6 +137,134 @@ readonly CLICLICK_SOURCE="brew"     # "brew" or direct URL for internal Artifact
 ```
 
 The AppleScript never needs to be modified per environment — it reads everything from defaults written by the stage script. All credentials and URLs live in Secrets Manager. To rotate passwords or update the Jamf URL, update `mdmSecret` — no script changes needed.
+
+---
+
+## Running It End to End
+
+Two ways to run this: the Step Functions pipeline, which is the normal path, and by hand over SSM, which is for debugging. Everything lives in **us-east-2**.
+
+### The pipeline
+
+| State machine | Purpose |
+|---|---|
+| `jpmc-ec2-staging-pipeline` | Launch, setup, SIP disable, stage, snapshot AMI |
+| `jpmc-ec2-test-pipeline` | Launch instances from an AMI and verify enrollment (20 iterations) |
+
+Start a build:
+
+```bash
+aws stepfunctions start-execution \
+  --region us-east-2 \
+  --state-machine-arn arn:aws:states:us-east-2:767405844957:stateMachine:jpmc-ec2-staging-pipeline \
+  --input '{}'
+```
+
+`{}` builds the **latest** macOS available as an EC2 Mac AMI. That is deliberate: this account is a sandbox and testing the newest OS is the point. The `jpmc-staging-launch` Lambda picks the dedicated **host first**, because host firmware caps what can boot, and only then picks the newest AMI that host supports.
+
+> **Never sort the AMI lookup on `CreationDate`.** macOS 15.8 was published 8 seconds *after* 27.0, so date order lies about which is newer. The Lambda sorts on a version tuple parsed out of the AMI name.
+
+To pin a version instead of taking the latest:
+
+```bash
+--input '{"macos_version":"27"}'
+```
+
+Lambdas run in this order:
+
+```
+launch → check_instance → check_ssm → run_setup → disable_sip → check_sip
+      → run_stage → create_ami → check_ami → trigger_tests → terminate_instance
+
+trigger_tests fans out to the test pipeline:
+      test_launch → test_wait_enrollment → test_pull_logs → test_terminate
+```
+
+Follow an execution:
+
+```bash
+aws stepfunctions describe-execution --region us-east-2 \
+  --execution-arn <execution-arn> \
+  --query '{Status:status,Started:startDate,Stopped:stopDate,Error:error,Cause:cause}'
+```
+
+### By hand over SSM
+
+Use this when you need to iterate on a single box. **Both shell scripts must run as `ec2-user`, not root.** SSM runs commands as root, so every invocation has to drop privileges.
+
+**Step 1 — user setup**
+
+```bash
+aws ssm send-command --region us-east-2 \
+  --instance-ids i-xxxxxxxxxxxx \
+  --document-name AWS-RunShellScript \
+  --parameters 'commands=[
+    "rm -f /tmp/JPMC-setup-user.sh",
+    "curl -fsSL <raw-url>/JPMC-setup-user.sh -o /tmp/JPMC-setup-user.sh",
+    "chown ec2-user:staff /tmp/JPMC-setup-user.sh",
+    "chmod +x /tmp/JPMC-setup-user.sh",
+    "sudo -u ec2-user /tmp/JPMC-setup-user.sh"
+  ]'
+```
+
+> **Always `rm -f` the target path first.** If the pipeline already ran, `/tmp/JPMC-*.sh` is owned by root and `ec2-user` cannot overwrite it. `curl` then fails with `curl: (56) Failure writing output`, and because the old file is still sitting there the stale version runs instead. That has cost real debugging time. Confirm you are running what you think you are:
+>
+> ```bash
+> grep -c find_user_tcc_db /tmp/JPMC-stage-enrollment.sh
+> ```
+
+**Step 2 — disable SIP**
+
+The supported call is `create-mac-system-integrity-protection-modification-task`. The instance reboots into recovery and back, which takes roughly 2.5 hours on Apple silicon.
+
+```bash
+aws ec2 create-mac-system-integrity-protection-modification-task \
+  --region us-east-2 \
+  --instance-id i-xxxxxxxxxxxx \
+  --mac-system-integrity-protection-status disabled \
+  --mac-credentials '{"rootVolumeUsername":"ec2-user","rootVolumePassword":"..."}'
+```
+
+> This puts the admin password in your shell history, which is exactly what the rest of this project avoids. Prefer the pipeline, where `jpmc-staging-disable_sip` reads it from Secrets Manager and it never touches a terminal.
+
+Confirm before continuing:
+
+```bash
+aws ec2 describe-instances --region us-east-2 --instance-ids i-xxxxxxxxxxxx \
+  --query 'Reservations[0].Instances[0].MacSystemIntegrityProtectionStatus'
+```
+
+**Step 3 — stage**
+
+Same pattern as step 1, with `JPMC-stage-enrollment.sh`. It downloads and compiles `JPMC-EC2-Enroll.applescript`, writes the LaunchAgent, and runs the Phase 7 and 7.5 verification gates. It exits non-zero if any gate fails, so read the tail of its output.
+
+**Step 4 — snapshot, then launch from the AMI**
+
+Enrollment fires on its own at first GUI login. Nothing else to run.
+
+### Re-running enrollment on a live instance
+
+The enrollment job is a **LaunchAgent**, not a daemon, because it needs the GUI session:
+
+```bash
+sudo launchctl bootout   gui/501/com.jpmc.ec2.mdm.enrollment
+sudo launchctl bootstrap gui/501 /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist
+tail -f /Library/Logs/JPMC/EC2-Enroll.log
+```
+
+If it is already registered, this is quicker:
+
+```bash
+sudo launchctl kickstart -k gui/501/com.jpmc.ec2.mdm.enrollment
+```
+
+`501` is `ec2-user`. Confirm with `id -u ec2-user` if you are unsure.
+
+If the agent cannot write its log, fix ownership rather than loosening permissions:
+
+```bash
+sudo chown -R ec2-user:staff /Library/Logs/JPMC
+```
 
 ---
 
@@ -236,15 +365,49 @@ On a fresh AMI boot, **per-user Setup Assistant ("Buddy")** presents a nine-pane
 
 Panes observed on macOS 27.0: Accessibility → **Apple ID sign-in** → Age (child/teen/adult) → Appearance → Analytics → Screen Time → Software updates → **Liquid Glass** → Welcome.
 
-The Apple ID pane cannot be answered headlessly. And `tell application settingsApp to activate` does **not** win the foreground back from Buddy — that was tested.
+The Apple ID pane cannot be answered headlessly. And `tell application settingsApp to activate` does **not** win the foreground back from Buddy. That was tested.
 
-**Handled in Phase 7.5 with two layers.**
+#### What does not work, and why — do not retry these
 
-*Layer 1 — Apple's documented mechanism.* `SkipSetupItems` in the `com.apple.SetupAssistant.managed` domain. An MDM normally delivers this as a `com.apple.ManagedClient.preferences` profile and ManagedClient unwraps it to `/Library/Managed Preferences/`. We cannot use MDM, because Buddy runs before enrollment and enrollment is the goal, so the stage script writes the unwrapped result directly. Requires SIP disabled, which Phase 1 already depends on. A standalone copy for manual testing is at [`com.apple.SetupAssistant.managed.plist`](com.apple.SetupAssistant.managed.plist). Pattern reference: [rtrouton/profiles SkipWelcomeToMacSetup](https://github.com/rtrouton/profiles/tree/main/SkipWelcomeToMacSetup), which does the same via MDM but only skips `Welcome`.
+| Approach | Result |
+|---|---|
+| `SkipSetupItems` written to `/Library/Managed Preferences/com.apple.SetupAssistant.managed.plist` | **Disproved 2026-10-08.** `ManagedClient` owns that directory and prunes anything with no backing MDM profile. Gone after one boot |
+| Delivering `SkipSetupItems` as a real configuration profile | Circular. Needs the MDM enrollment Buddy is blocking |
+| `tell application "System Settings" to activate` | Does not take the foreground from Buddy |
+| Setting every `DidSee*` key to `1` and nothing else | Insufficient. Several panes are gated on `LastSeen*ProductVersion` strings instead |
 
-*Layer 2 — per-user pre-seed, because Layer 1 has a gap.* The **Liquid Glass pane has no skip key.** The macOS 27.0.1 Setup Assistant binary contains `GlassSelection`, `GlassSelectionFlowItem`, `GlassSelectionViewController` and `LastSeenGlassTintUpsellProductVersion`, but nothing matching in the skip-key vocabulary. Layer 1 alone takes you from nine panes to one.
+The managed-preference route looked right because it is Apple's documented mechanism. The system log is unambiguous about why it fails:
 
-**Layer 2 is not simply "set every `DidSee*` to 1".** macOS 27 tracks panes two different ways. After manually completing all nine panes, these were still `0`:
+```
+ManagedClient: Notifying CFPrefsD Of Updated Managed Preferences
+RemoveObsoleteBMAIDAccounts: checking against 0 MDM profiles
+```
+
+Zero profiles, so the file is reaped. After a reboot `/Library/Managed Preferences/` held only the `ec2-user` subdirectory.
+
+#### What does work — three layers
+
+**Layer A — the loginwindow gate.** `MiniBuddyLaunch` in the **per-user** `com.apple.loginwindow` domain, not in `com.apple.SetupAssistant`. That is why earlier versions of Phase 7.5 missed it entirely. Found in loginwindow's own log:
+
+```
+-[Login1 miniBuddyOption]_block_invoke | NOT mbsetupuser, checking pref
+MiniBuddyLaunch pref is set, setting miniBuddyOption to kMinibuddyOptionMBPrefSet
+-[Login1 miniBuddyOption] | returning: 2
+A minibuddy option is set, calling startMiniBuddy
+```
+
+After deleting the key, the same code path logged:
+
+```
+MiniBuddyLaunch pref is NOT set
+-[Login1 miniBuddyOption] | returning: 0
+```
+
+So the gate works. It is **necessary but not sufficient**: Buddy still appeared once through a second launch path carrying no `-MiniBuddyYes` flag, which has not been identified. That second path is why Layer C exists.
+
+**Layer B — per-user pre-seed.** Marks every pane already-seen in `com.apple.SetupAssistant`. Verified to survive the AMI snapshot: on a fresh instance every `DidSee*` read `1` and every version key read `27.0`, including `LastSeenGlassTintUpsellProductVersion`.
+
+Layer B is not simply "set every `DidSee*` to 1". macOS 27 tracks panes two different ways. After manually completing all nine panes, these were still `0`:
 
 ```
 DidSeeActivationLock  DidSeeAppStore  DidSeeApplePaySetup  DidSeeLockdownMode
@@ -253,15 +416,31 @@ DidSeeSyncSetup  DidSeeSyncSetup2  DidSeeTermsOfAddress  DidSeeTouchIDSetup
 
 Several panes are gated on `LastSeen*ProductVersion` strings instead, which **re-trigger on every OS version bump**. That is why an AMI built in September still showed panes. Those values are computed from `sw_vers` at runtime rather than hardcoded, so a 27.1 or 28.0 AMI seeds itself correctly.
 
-Phase 7.5 exits non-zero if either layer fails to land, because a silent miss means every instance from the AMI stalls at Buddy and enrollment never runs.
+The **Liquid Glass pane has no skip key at all.** The macOS 27.0.1 Setup Assistant binary contains `GlassSelection`, `GlassSelectionFlowItem`, `GlassSelectionViewController` and `LastSeenGlassTintUpsellProductVersion`, but nothing matching in the skip-key vocabulary. Layer B is the only way to suppress it.
+
+**Layer C — kill it at runtime.** `quitSetupAssistant()` in `JPMC-EC2-Enroll.applescript` runs at the top of `installProfile` and again at the top of `enterAdminPassword`, and kills Buddy outright if it is on screen. This is the only layer verified to clear it unconditionally. Measured on `i-0193db62a18036255`: `killall` succeeded, process count went to `0`, frontmost went to none, and it did **not** respawn.
+
+`quit` via Apple events is not used. Buddy logs `reasserting frontmostness for MiniBuddy!` and does not honour a polite quit. Nothing of value is lost by killing it: there is no Apple ID on these instances, no user to onboard, and device setup is already marked complete.
+
+Layers A and B reduce how often C has to fire. C is what guarantees the screen is clear at the moment we click.
+
+Phase 7.5 exits non-zero if Layer A or B fails to land, because a silent miss means every instance from that AMI leans entirely on C.
 
 **Verifying on a fresh instance:**
 
 ```bash
-ls -la "/Library/Managed Preferences/com.apple.SetupAssistant.managed.plist"
+# Layer A — should print nothing and exit non-zero
+defaults read com.apple.loginwindow MiniBuddyLaunch
+
+# Layer B — every DidSee* should be 1, version keys should match sw_vers
 defaults read com.apple.SetupAssistant
-lsappinfo list | grep -i "in front"
+
+# Layer C — is it on screen right now?
 ps aux | grep -i "[S]etup Assistant"
+lsappinfo list | grep -i "in front"
+
+# What decision did loginwindow actually make this boot?
+log show --last 1h --predicate 'process == "loginwindow"' | grep -i minibuddy
 ```
 
 ### Internal-SSD disk unlock prompt ("Enter a password to unlock the disk")
@@ -281,7 +460,7 @@ There is no password. The volume is not ours, is not in the AMI (which captures 
 1. The modal owns the foreground. Observed at 430x194 at position (558,118), which spans x 558-988 and y 118-312 — covering the exact coordinates targeted for the MDM Profile row.
 2. `SecurityAgent` serialises its authorization sessions. While this prompt holds one, the profile-install password prompt can never come forward.
 
-**Handling:** `JPMC-EC2-Enroll.applescript` calls `dismissDiskUnlockPrompt()` in two places — at the top of `installProfile` before any UI interaction, and again at the top of `enterAdminPassword`. The second call is not redundant: the wait loop there only tests that `SecurityAgent` *has* a window, not which dialog it is, so without it the admin password could be pasted into the unlock prompt instead of the install prompt.
+**Handling (verified working 2026-10-08** on `i-0193db62a18036255`, which logged `Disk unlock prompt detected — dismissing` then `Disk unlock prompt cancelled` with no persistence warning**).** `JPMC-EC2-Enroll.applescript` calls `dismissDiskUnlockPrompt()` in two places — at the top of `installProfile` before any UI interaction, and again at the top of `enterAdminPassword`. The second call is not redundant: the wait loop there only tests that `SecurityAgent` *has* a window, not which dialog it is, so without it the admin password could be pasted into the unlock prompt instead of the install prompt.
 
 **Not fixable with `/etc/fstab`.** An `fstab` `noauto` entry does not suppress this. `fstab` is read by `diskarbitrationd` when deciding whether to mount a filesystem, but the FileVault unlock attempt happens *upstream* of that, so `fstab` is never consulted for an encrypted volume. AWS suggested this approach in case 178535629800759; it is the wrong mechanism for this disk. Deleting the volume is also not viable — `diskutil apfs deleteVolume` commonly returns `-69888` on locked volumes, and it would destroy host state we do not own.
 
@@ -299,23 +478,82 @@ log show --last 30m --predicate 'process == "SecurityAgent"' | grep -i unlockDis
 
 A `DUAuthMechanismPrompt unlockDiskWithUser:password:rememberPassword:` entry confirms it. `diskarbitrationd -d` writes verbose decisions to `/var/log/diskarbitrationd.log` if deeper detail is needed.
 
+### Stale downloaded profiles accumulate across retries
+
+Every `open` of a `.mobileconfig` appends another entry to **System Settings → General → Device Management → Downloaded**, and nothing removes the old ones. Because the LaunchAgent retries every 5 minutes, a box that has been failing for a while builds up a list.
+
+Measured on `i-0193db62a18036255` after nine attempts, the outline held 3 rows:
+
+```
+row 1  Downloaded                                          <- section header
+row 2  MDM Profile / Profile not installed. Double-click to review.
+row 3  MDM Profile / Profile not installed. Double-click to review.
+```
+
+The script used to hardcode `row 2`, which is correct only on the very first attempt. From the second attempt onward row 2 is the **oldest** download, carrying a spent enrollment invitation, while the profile the current run just created sits at the bottom.
+
+**Fixed** by targeting the last row instead. The log now reports how many accumulated, so this is visible rather than silent:
+
+```
+MDM Profile found - using the newest of 2 downloaded profile(s) - opening install sheet...
+```
+
+If that count is above 1 on a box you are debugging, earlier attempts already failed.
+
+### Never drive the UI over SSM
+
+**Run UI automation from the LaunchAgent, or via a LaunchAgent bootstrapped into `gui/501`. Never over SSM, and never over SSH.**
+
+TCC authorises on the **responsible process**, not the process making the call. From the LaunchAgent, the responsible process is `osascript`, which the stage script grants:
+
+```
+AUTHREQ_SUBJECT: subject=/usr/bin/osascript
+Evaluated composed authorization from kTCCServicePostEvent
+  to parent service kTCCServiceAccessibility: Auth:Allowed (User Set)
+```
+
+That inheritance also covers `cliclick`, even though `cliclick` has no TCC entry of its own, which is why no grant is needed for it:
+
+```
+AttributionChain: responsible={osascript}, accessing={cliclick}, requesting={cliclick}
+```
+
+Run the same `osascript` over SSM and the responsible process becomes `amazon-ssm-agent`, which has no AppleEvents grant. TCC then raises a consent dialog:
+
+```
+"amazon-ssm-agent" wants access to control "System Events".
+```
+
+**That dialog is the trap.** It is drawn by `tccd`, which is not a visible application, so it does not appear in:
+
+```applescript
+every process whose visible is true
+```
+
+It sits on screen covering the click target, invisible to any probe that filters on visibility, and every subsequent click silently lands on the back of it. On 2026-10-08 two such dialogs were left over the MDM Profile row at (628,231):
+
+```
+universalAccessAuthWarn  win "Screen Recording"  pos=(281,154) size=(461x181)
+UserNotificationCenter   win ""                  pos=(382,133) size=(260x272)
+```
+
+Both contained the target. Enrollment attempts during that window failed for that reason alone and the results were worthless.
+
+To enumerate what is really on screen, drop the filter:
+
+```applescript
+tell application "System Events" to set allProcs to every process
+```
+
+Same trap over SSH, where TCC blames `sshd-keygen-wrapper` and `osascript` times out with `-1712`.
+
 ### Automatic retry — ThrottleInterval
 
 The LaunchAgent is also configured with `ThrottleInterval = 300` as a backstop. If the enrollment script exits with an error after launchd hands off (e.g. Jamf API unreachable, Secrets Manager auth fails), launchd automatically retries it every 5 minutes until it succeeds. You will see multiple `=== JPMC-EC2-Enroll started ===` entries in the log — this is expected behavior, not a problem. Once enrollment succeeds and prodFlag=1 cleanup runs, the LaunchAgent removes itself and retries stop.
 
 ### Force-retrigger enrollment
 
-If the LaunchAgent didn't fire or you need to retry manually:
-
-```bash
-sudo chmod 777 /Library/Logs/JPMC
-launchctl bootstrap gui/$(id -u) /Library/LaunchAgents/com.jpmc.ec2.mdm.enrollment.plist
-```
-
-Or kickstart if already registered:
-```bash
-launchctl kickstart -k gui/501/com.jpmc.ec2.mdm.enrollment
-```
+See [Re-running enrollment on a live instance](#re-running-enrollment-on-a-live-instance). It is a LaunchAgent in `gui/501`, not a daemon, so `system/` targets will not find it.
 
 ### Enable VNC for visual debugging
 
@@ -340,7 +578,10 @@ Finder → ⌘K → `vnc://localhost` — log in as `ec2-user`.
 | `IMDS unavailable after 12 attempts (Xs elapsed)` | Real IMDS failure (network is already confirmed up by launchd before script fires) | Check elapsed time — if long, investigate IMDS service health. LaunchAgent will retry automatically every 5 minutes |
 | `Network interface not ready (scutil --nwi) — waiting...` | launchd fired the agent but interface flapped briefly | Defense-in-depth gate, will pass when interface returns. Should be rare |
 | `MDM Profile not found` | Profile popup not dismissed correctly | Check log for navigation step, kickstart to retry |
-| `Install button not found after 10 seconds`, with `MDM Profile found` logged just before | A modal owns the foreground, so cliclick's physical click misses System Settings. Usually the internal-SSD unlock prompt, or Setup Assistant on a first boot | See "Internal-SSD disk unlock prompt" above. Check `lsappinfo list \| grep -i "in front"` |
+| `Install button not found after 10 seconds`, with `MDM Profile found` logged just before | A modal owns the foreground, so cliclick's physical click misses System Settings. Usually the internal-SSD unlock prompt, Setup Assistant on a first boot, or a TCC consent dialog left behind by someone running osascript over SSM | Enumerate **every** process with a window, not just visible ones. See "Never drive the UI over SSM" and "Internal-SSD disk unlock prompt" above |
+| `using the newest of N downloaded profile(s)` where N > 1 | Earlier attempts already failed and left stale downloads behind | Not itself a fault. Read back through the log for the first failure |
+| `ABORTED - unhandled error <n>` | An unhandled AppleScript error. Status is still reported, so the pipeline terminates and rebuilds rather than hanging | Read the error number and message in the log line |
+| `WARNING: Setup Assistant respawned after killall` | Buddy is being restarted by the unidentified second launch path | Layers A and B did not hold. Check `defaults read com.apple.loginwindow MiniBuddyLaunch` on the AMI |
 | `cliclick failed on all paths` | cliclick binary missing from AMI | Re-stage — Phase 2 of stage script installs and caches it |
 
 ---
@@ -364,6 +605,7 @@ When `PROD_FLAG="1"` is set in the stage script, after successful enrollment the
 ## Security
 
 - Passwords are never written to disk, never appear in env vars, or shell history
+- The top-level error handler redacts the admin password out of error text before anything is logged or uploaded. `do shell script` failures can echo the failing command, and some of those commands carry the password. The value is held in memory only for the duration of the run and cleared when it ends
 - Credentials live only in AppleScript runtime memory during enrollment
 - Admin password is placed on clipboard for SecurityAgent, then immediately cleared twice
 - All secrets are retrieved live from Secrets Manager at runtime — nothing is baked into the AMI
@@ -391,7 +633,9 @@ When `PROD_FLAG="1"` is set in the stage script, after successful enrollment the
 | Post-enrollment cleanup | Removes cliclick via brew | Removes entire `._jpmc-tools/` cache + script + LaunchAgent plist |
 | Panic dialog at boot | Blocks UI automation, no handling | Stage script clears `.panic` files pre-snapshot; enrollment script bootouts `DiagnosticsReporter` defensively at runtime |
 | Internal-SSD FileVault unlock prompt | Not handled — enrollment fails on affected hosts | `dismissDiskUnlockPrompt()` clears it before UI automation and again before password entry |
-| Per-user Setup Assistant on macOS 27 | Not handled — blocks the foreground on every first login | Phase 7.5 writes the `SkipSetupItems` managed preference and pre-seeds `com.apple.SetupAssistant` with runtime-computed version values |
+| Per-user Setup Assistant on macOS 27 | Not handled — blocks the foreground on every first login | Three layers: Phase 7.5 clears the loginwindow `MiniBuddyLaunch` gate and pre-seeds `com.apple.SetupAssistant` with runtime-computed version values; `quitSetupAssistant()` kills it at runtime if it still appears |
+| Stale downloaded profiles on retry | Clicks a fixed row index, so retries click a spent profile | Targets the newest downloaded profile and logs how many accumulated |
+| Unhandled script error | No status written, caller left guessing | Top-level handler still writes `ENROLLMENT_STATUS` and the S3 object, with secrets redacted and the reason JSON-escaped |
 | Per-user TCC database on macOS 27 | N/A | Stage script discovers the relocated ProtectedSystem container by metadata identity rather than a hardcoded UUID |
 | Secrets Manager JSON parsing | Python + `eval` + `shlex.quote` (shell anti-pattern flagged by SAST) | `plutil -extract raw` — Apple-native, no eval, no third-party deps |
 | Jamf authentication | Basic auth (deprecated in modern Jamf Pro) | OAuth client credentials via `/api/oauth/token`, parsed with `plutil` |
