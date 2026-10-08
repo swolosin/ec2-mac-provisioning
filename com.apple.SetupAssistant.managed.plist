@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ============================================================================
+  com.apple.SetupAssistant.managed  —  SkipSetupItems
+
+  WHAT THIS IS
+  The managed-preference form of Apple's SkipSetupItems setting. Normally an
+  MDM delivers this as a configuration profile with PayloadType
+  com.apple.ManagedClient.preferences, and ManagedClient unwraps it onto disk at
+
+      /Library/Managed Preferences/com.apple.SetupAssistant.managed.plist
+
+  This file IS that on-disk result. We write it directly because we cannot use
+  MDM: Setup Assistant runs at first login, before enrollment, and enrollment is
+  the thing we are trying to achieve. Writing it by hand requires SIP disabled,
+  which the staging pipeline already does for the TCC grants.
+
+  Pattern reference: rtrouton/profiles SkipWelcomeToMacSetup.mobileconfig, which
+  does the same thing via MDM but only skips "Welcome".
+
+  WHY WE NEED IT
+  On a fresh AMI boot, per-user Setup Assistant ("Buddy") presents a nine-pane
+  wizard and runs FRONTMOST as com.apple.SetupAssistant. Verified via lsappinfo:
+  System Settings sat at list position 49 while Buddy held the foreground, so
+  cliclick's physical clicks landed on Buddy and enrollment failed 16 times at
+  "Install button not found". One pane is an Apple ID sign-in we have no account
+  for, so it cannot be answered headlessly.
+
+  Note that "tell application settingsApp to activate" does NOT beat Buddy.
+  That was tested and it does not work.
+
+  KEY LIST
+  Values below were extracted from the Setup Assistant binary on macOS 27.0.1
+  (strings on /System/Library/CoreServices/Setup Assistant.app) and
+  cross-checked against Apple's documented SkipSetupItems vocabulary.
+  Unrecognised keys are ignored, so a superset is safe and forward-compatible.
+
+  Deliberately EXCLUDED: the Organization* keys (OrganizationName,
+  OrganizationAddress and friends). Those are Automated Device Enrollment
+  profile fields, not skip items, and have no meaning here.
+
+  KNOWN GAP — LIQUID GLASS
+  The Liquid Glass / glass tint pane has NO skip key. The binary contains
+  GlassSelection, GlassSelectionFlowItem, GlassSelectionViewController and
+  LastSeenGlassTintUpsellProductVersion, but no matching entry in the skip-key
+  vocabulary. So this file alone will still leave that one pane on screen.
+  It is handled separately by pre-seeding com.apple.SetupAssistant for the user
+  (LastSeenGlassTintUpsellProductVersion + SkipExpressSettingsUpdating).
+
+  UNTESTED as of 2026-10-08. Written without a live box. Verify by checking the
+  pane sequence on a fresh instance and by confirming the file survives the AMI
+  snapshot. See memory: project-macos27-disk-unlock-prompt,
+  project-macos27-enrollment-test.
+  ============================================================================
+-->
+<plist version="1.0">
+<dict>
+	<key>SkipSetupItems</key>
+	<array>
+		<string>Accessibility</string>
+		<string>AppStore</string>
+		<string>Appearance</string>
+		<string>AppleID</string>
+		<string>ApplePay</string>
+		<string>Biometric</string>
+		<string>DeviceToDeviceMigration</string>
+		<string>Diagnostics</string>
+		<string>DisplayTone</string>
+		<string>ExpressLanguage</string>
+		<string>FileVault</string>
+		<string>Intelligence</string>
+		<string>Keyboards</string>
+		<string>Location</string>
+		<string>OSShowcase</string>
+		<string>Payment</string>
+		<string>PreferredLanguage</string>
+		<string>Privacy</string>
+		<string>Registration</string>
+		<string>Restore</string>
+		<string>RestoreCompleted</string>
+		<string>ScreenSaver</string>
+		<string>ScreenTime</string>
+		<string>Siri</string>
+		<string>SoftwareUpdate</string>
+		<string>SpokenLanguage</string>
+		<string>TOS</string>
+		<string>TapToSetup</string>
+		<string>TermsOfAddress</string>
+		<string>TouchID</string>
+		<string>TrueTone</string>
+		<string>UnlockWithWatch</string>
+		<string>Update</string>
+		<string>UpdateCompleted</string>
+		<string>Wallpaper</string>
+		<string>WatchMigration</string>
+		<string>Welcome</string>
+		<string>iCloudDiagnostics</string>
+		<string>iCloudStorage</string>
+	</array>
+</dict>
+</plist>

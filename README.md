@@ -15,6 +15,10 @@ Supports **macOS 14 (Sonoma)**, **macOS 15 (Sequoia)**, **macOS 26 (Tahoe)**, an
 ├── JPMC-setup-user.sh           # Step 1 — run via SSM on new instance
 ├── JPMC-stage-enrollment.sh     # Step 3 — run via SSM after SIP disable
 ├── JPMC-EC2-Enroll.applescript  # Compiled and installed by stage script
+├── com.apple.SetupAssistant.managed.plist
+│                                # Standalone copy of the SkipSetupItems managed
+│                                # preference, for manual testing. The stage
+│                                # script writes this inline in Phase 7.5
 └── EC2_AWS_Build/               # Original AWS scripts (reference only)
 ```
 
@@ -46,6 +50,9 @@ JPMC-stage-enrollment.sh
   • Downloads JPMC-EC2-Enroll.applescript from GitHub, compiles to .scpt
   • Writes MMSecret + prodFlag to defaults
   • Writes LaunchAgent plist directly to /Library/LaunchAgents/
+  • Suppresses per-user Setup Assistant two ways: writes the SkipSetupItems
+    managed preference, and pre-seeds com.apple.SetupAssistant with version
+    values computed from sw_vers (see Troubleshooting)
   • Disables RandomizePassword in ec2-macos-init
   • Clears ec2-macos-init instance history
   • Clears /Library/Logs/DiagnosticReports/ panic + ips files so the AMI
@@ -221,6 +228,42 @@ This is handled in two places:
 
 The combination means existing AMIs (with the panic file baked in) still enroll successfully via the runtime bootout, and new AMIs (built with the updated stage script) never have the file at all.
 
+### Setup Assistant blocks enrollment on first login (macOS 27)
+
+On a fresh AMI boot, **per-user Setup Assistant ("Buddy")** presents a nine-pane wizard and runs **frontmost** as `com.apple.SetupAssistant`. Confirmed with `lsappinfo`: Setup Assistant held `(in front)` while System Settings sat at list position 49. Enrollment failed 16 consecutive times at `Install button not found after 10 seconds`.
+
+`/var/db/.AppleSetupDone` is already in the AMI and suppresses the **device** Setup Assistant. It does nothing for the **per-user** Buddy flow.
+
+Panes observed on macOS 27.0: Accessibility → **Apple ID sign-in** → Age (child/teen/adult) → Appearance → Analytics → Screen Time → Software updates → **Liquid Glass** → Welcome.
+
+The Apple ID pane cannot be answered headlessly. And `tell application settingsApp to activate` does **not** win the foreground back from Buddy — that was tested.
+
+**Handled in Phase 7.5 with two layers.**
+
+*Layer 1 — Apple's documented mechanism.* `SkipSetupItems` in the `com.apple.SetupAssistant.managed` domain. An MDM normally delivers this as a `com.apple.ManagedClient.preferences` profile and ManagedClient unwraps it to `/Library/Managed Preferences/`. We cannot use MDM, because Buddy runs before enrollment and enrollment is the goal, so the stage script writes the unwrapped result directly. Requires SIP disabled, which Phase 1 already depends on. A standalone copy for manual testing is at [`com.apple.SetupAssistant.managed.plist`](com.apple.SetupAssistant.managed.plist). Pattern reference: [rtrouton/profiles SkipWelcomeToMacSetup](https://github.com/rtrouton/profiles/tree/main/SkipWelcomeToMacSetup), which does the same via MDM but only skips `Welcome`.
+
+*Layer 2 — per-user pre-seed, because Layer 1 has a gap.* The **Liquid Glass pane has no skip key.** The macOS 27.0.1 Setup Assistant binary contains `GlassSelection`, `GlassSelectionFlowItem`, `GlassSelectionViewController` and `LastSeenGlassTintUpsellProductVersion`, but nothing matching in the skip-key vocabulary. Layer 1 alone takes you from nine panes to one.
+
+**Layer 2 is not simply "set every `DidSee*` to 1".** macOS 27 tracks panes two different ways. After manually completing all nine panes, these were still `0`:
+
+```
+DidSeeActivationLock  DidSeeAppStore  DidSeeApplePaySetup  DidSeeLockdownMode
+DidSeeSyncSetup  DidSeeSyncSetup2  DidSeeTermsOfAddress  DidSeeTouchIDSetup
+```
+
+Several panes are gated on `LastSeen*ProductVersion` strings instead, which **re-trigger on every OS version bump**. That is why an AMI built in September still showed panes. Those values are computed from `sw_vers` at runtime rather than hardcoded, so a 27.1 or 28.0 AMI seeds itself correctly.
+
+Phase 7.5 exits non-zero if either layer fails to land, because a silent miss means every instance from the AMI stalls at Buddy and enrollment never runs.
+
+**Verifying on a fresh instance:**
+
+```bash
+ls -la "/Library/Managed Preferences/com.apple.SetupAssistant.managed.plist"
+defaults read com.apple.SetupAssistant
+lsappinfo list | grep -i "in front"
+ps aux | grep -i "[S]etup Assistant"
+```
+
 ### Internal-SSD disk unlock prompt ("Enter a password to unlock the disk")
 
 Some EC2 Mac dedicated hosts carry a **FileVault-locked APFS volume group on the Mac mini's own internal SSD** (`disk0` → container `disk3`), left behind by a previous tenancy. At every GUI login macOS attempts to mount it, has no key, and `SecurityAgent` presents a modal:
@@ -348,6 +391,7 @@ When `PROD_FLAG="1"` is set in the stage script, after successful enrollment the
 | Post-enrollment cleanup | Removes cliclick via brew | Removes entire `._jpmc-tools/` cache + script + LaunchAgent plist |
 | Panic dialog at boot | Blocks UI automation, no handling | Stage script clears `.panic` files pre-snapshot; enrollment script bootouts `DiagnosticsReporter` defensively at runtime |
 | Internal-SSD FileVault unlock prompt | Not handled — enrollment fails on affected hosts | `dismissDiskUnlockPrompt()` clears it before UI automation and again before password entry |
+| Per-user Setup Assistant on macOS 27 | Not handled — blocks the foreground on every first login | Phase 7.5 writes the `SkipSetupItems` managed preference and pre-seeds `com.apple.SetupAssistant` with runtime-computed version values |
 | Per-user TCC database on macOS 27 | N/A | Stage script discovers the relocated ProtectedSystem container by metadata identity rather than a hardcoded UUID |
 | Secrets Manager JSON parsing | Python + `eval` + `shlex.quote` (shell anti-pattern flagged by SAST) | `plutil -extract raw` — Apple-native, no eval, no third-party deps |
 | Jamf authentication | Basic auth (deprecated in modern Jamf Pro) | OAuth client credentials via `/api/oauth/token`, parsed with `plutil` |

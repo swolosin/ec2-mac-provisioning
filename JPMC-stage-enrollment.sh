@@ -482,7 +482,9 @@ echo "LaunchAgent plist contents:"
 /bin/cat "$LAUNCHAGENT_PLIST"
 
 echo ""
-LAUNCHCTL_CHECK=$(/bin/launchctl list | /usr/bin/grep enrollment || true)
+# Match the exact label. A bare "enrollment" grep matches com.apple.betaenrollmentd,
+# so this check reported success-looking output while verifying nothing.
+LAUNCHCTL_CHECK=$(/bin/launchctl list | /usr/bin/grep "com.jpmc.ec2.mdm.enrollment" || true)
 if [[ -z "$LAUNCHCTL_CHECK" ]]; then
   echo "  launchctl: OK (LaunchAgent not loaded — correct, no GUI session)"
 else
@@ -491,6 +493,191 @@ fi
 
 echo ""
 echo "=== Phase 7 complete ==="
+echo ""
+
+# =====================================================
+# Phase 7.5: Suppress per-user Setup Assistant ("Buddy")
+#
+# THE PROBLEM
+# On a fresh AMI boot, per-user Setup Assistant presents a nine-pane wizard and
+# runs FRONTMOST as com.apple.SetupAssistant. Confirmed with lsappinfo on
+# i-0dd72e64163595dd1: Setup Assistant held "(in front)" while System Settings
+# sat at list position 49. cliclick sends PHYSICAL clicks, which land on
+# whatever owns the screen, so enrollment failed 16 consecutive times at
+# "Install button not found after 10 seconds" even though the preceding
+# "MDM Profile found" succeeded (accessibility queries do not need focus).
+#
+# One pane is an Apple ID sign-in. There is no Apple ID, so it cannot be
+# answered headlessly. "tell application settingsApp to activate" does NOT win
+# the foreground back from Buddy; that was tested and it does not work.
+#
+# /var/db/.AppleSetupDone (already present in the AMI) suppresses the DEVICE
+# Setup Assistant. It does nothing for the PER-USER Buddy flow, which is what
+# we hit.
+#
+# WHY TWO LAYERS
+# Layer 1 is Apple's documented mechanism, SkipSetupItems in the
+# com.apple.SetupAssistant.managed domain. Normally an MDM delivers it as a
+# com.apple.ManagedClient.preferences profile; ManagedClient then unwraps it to
+# /Library/Managed Preferences/. We cannot use MDM here (Buddy runs before
+# enrollment, and enrollment is the goal), so we write the unwrapped result
+# directly. That needs SIP disabled, which Phase 1 already relies on.
+# Pattern reference: rtrouton/profiles SkipWelcomeToMacSetup.mobileconfig.
+#
+# Layer 2 exists because SkipSetupItems does not cover everything. The Liquid
+# Glass pane has NO skip key: the Setup Assistant binary on macOS 27.0.1
+# contains GlassSelection, GlassSelectionFlowItem, GlassSelectionViewController
+# and LastSeenGlassTintUpsellProductVersion, but no matching entry in the
+# skip-key vocabulary. Layer 2 pre-seeds the per-user com.apple.SetupAssistant
+# domain to mark every pane as already seen.
+#
+# Layer 2 is NOT simply "set every DidSee* to 1". macOS 27 tracks panes two
+# different ways, and after manually walking all nine panes these were STILL 0:
+# DidSeeActivationLock, DidSeeAppStore, DidSeeApplePaySetup, DidSeeLockdownMode,
+# DidSeeSyncSetup, DidSeeSyncSetup2, DidSeeTermsOfAddress, DidSeeTouchIDSetup.
+# Several panes are instead gated on LastSeen*ProductVersion strings, which
+# re-trigger on every OS version bump. That is why an AMI built in September
+# still showed panes. Those values are therefore computed from sw_vers at
+# runtime rather than hardcoded, so a 27.1 or 28.0 AMI seeds itself correctly.
+#
+# UNTESTED as of 2026-10-08. Both layers written without a live box. Verify by
+# watching the pane sequence on a fresh instance from the resulting AMI.
+# =====================================================
+
+echo "=== Phase 7.5: Suppress Setup Assistant ==="
+
+readonly MANAGED_PREFS_DIR="/Library/Managed Preferences"
+readonly SA_MANAGED_PLIST="${MANAGED_PREFS_DIR}/com.apple.SetupAssistant.managed.plist"
+
+# Values confirmed present in the macOS 27.0.1 Setup Assistant binary and
+# cross-checked against Apple's documented SkipSetupItems vocabulary.
+# Unrecognised keys are ignored, so a superset is safe and forward-compatible.
+# Organization* keys are deliberately excluded: those are Automated Device
+# Enrollment profile fields, not skip items.
+echo "Layer 1: writing SkipSetupItems managed preference..."
+/usr/bin/sudo /bin/mkdir -p "$MANAGED_PREFS_DIR"
+/usr/bin/sudo /usr/bin/tee "$SA_MANAGED_PLIST" > /dev/null <<'SAPLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>SkipSetupItems</key>
+	<array>
+		<string>Accessibility</string>
+		<string>AppStore</string>
+		<string>Appearance</string>
+		<string>AppleID</string>
+		<string>ApplePay</string>
+		<string>Biometric</string>
+		<string>DeviceToDeviceMigration</string>
+		<string>Diagnostics</string>
+		<string>DisplayTone</string>
+		<string>ExpressLanguage</string>
+		<string>FileVault</string>
+		<string>Intelligence</string>
+		<string>Keyboards</string>
+		<string>Location</string>
+		<string>OSShowcase</string>
+		<string>Payment</string>
+		<string>PreferredLanguage</string>
+		<string>Privacy</string>
+		<string>Registration</string>
+		<string>Restore</string>
+		<string>RestoreCompleted</string>
+		<string>ScreenSaver</string>
+		<string>ScreenTime</string>
+		<string>Siri</string>
+		<string>SoftwareUpdate</string>
+		<string>SpokenLanguage</string>
+		<string>TOS</string>
+		<string>TapToSetup</string>
+		<string>TermsOfAddress</string>
+		<string>TouchID</string>
+		<string>TrueTone</string>
+		<string>UnlockWithWatch</string>
+		<string>Update</string>
+		<string>UpdateCompleted</string>
+		<string>Wallpaper</string>
+		<string>WatchMigration</string>
+		<string>Welcome</string>
+		<string>iCloudDiagnostics</string>
+		<string>iCloudStorage</string>
+	</array>
+</dict>
+</plist>
+SAPLIST
+/usr/bin/sudo /usr/sbin/chown root:wheel "$SA_MANAGED_PLIST"
+/usr/bin/sudo /bin/chmod 644 "$SA_MANAGED_PLIST"
+
+if /usr/bin/plutil -lint "$SA_MANAGED_PLIST" > /dev/null 2>&1; then
+  echo "  managed preference written and valid: $SA_MANAGED_PLIST"
+else
+  echo "ERROR: $SA_MANAGED_PLIST is not a valid plist" >&2
+  exit 1
+fi
+
+# Layer 2: pre-seed the per-user domain. Version-keyed values are computed from
+# the running OS so this stays correct across point releases.
+echo "Layer 2: pre-seeding com.apple.SetupAssistant for $(/usr/bin/id -un)..."
+SA_PRODUCT_VERSION=$(/usr/bin/sw_vers -productVersion)
+SA_BUILD_VERSION=$(/usr/bin/sw_vers -buildVersion)
+echo "  running OS: ${SA_PRODUCT_VERSION} (${SA_BUILD_VERSION})"
+
+# Boolean DidSee* flags. Covers the panes that are tracked as simple booleans.
+for sa_key in \
+  DidSeeAccessibility DidSeeActivationLock DidSeeAppStore DidSeeAppearanceSetup \
+  DidSeeApplePaySetup DidSeeCloudSetup DidSeeLockdownMode DidSeePrivacy \
+  DidSeeScreenTime DidSeeSiriSetup DidSeeSyncSetup DidSeeSyncSetup2 \
+  DidSeeTermsOfAddress DidSeeTouchIDSetup DidSeeiCloudLoginForStorageServices \
+  SkipExpressSettingsUpdating SkipFirstLoginOptimization
+do
+  /usr/bin/defaults write com.apple.SetupAssistant "$sa_key" -bool true
+done
+
+# Version-keyed panes. These re-present whenever the recorded version differs
+# from the running OS, which is the mechanism that defeated the previous AMI.
+# LastSeenGlassTintUpsellProductVersion is the Liquid Glass pane, which has no
+# SkipSetupItems key and can only be suppressed here.
+for sa_vkey in \
+  LastSeenBuddyProductVersion LastSeenCloudProductVersion \
+  LastSeenDiagnosticsProductVersion LastSeenAgeRangeSelectionProductVersion \
+  LastSeenGlassTintUpsellProductVersion LastPreLoginTasksPerformedVersion \
+  InitialSetupProductVersion
+do
+  /usr/bin/defaults write com.apple.SetupAssistant "$sa_vkey" -string "$SA_PRODUCT_VERSION"
+done
+
+for sa_bkey in \
+  LastSeenBuddyBuildVersion LastPreLoginTasksPerformedBuild InitialSetupBuildVersion
+do
+  /usr/bin/defaults write com.apple.SetupAssistant "$sa_bkey" -string "$SA_BUILD_VERSION"
+done
+
+# MiniBuddyShouldLaunchToResumeSetup is the flag loginwindow checks to relaunch
+# Buddy mid-setup. Observed as 0 on a fully-completed box; force it off so a
+# partially-seeded state cannot resume the wizard.
+/usr/bin/defaults write com.apple.SetupAssistant MiniBuddyShouldLaunchToResumeSetup -bool false
+/usr/bin/defaults write com.apple.SetupAssistant MiniBuddyLaunchedPostMigration -bool false
+
+echo "  pre-seed written."
+echo ""
+echo "Setup Assistant state after seeding:"
+/usr/bin/defaults read com.apple.SetupAssistant 2>/dev/null | /usr/bin/grep -cE "DidSee|LastSeen|Skip" \
+  | /usr/bin/awk '{print "  " $1 " keys set"}'
+
+# Fail loudly if neither layer landed. A silent miss here means every instance
+# from this AMI stalls at Buddy and enrollment never runs.
+if [[ ! -f "$SA_MANAGED_PLIST" ]]; then
+  echo "ERROR: Setup Assistant managed preference missing after write" >&2
+  exit 1
+fi
+if ! /usr/bin/defaults read com.apple.SetupAssistant DidSeeAccessibility > /dev/null 2>&1; then
+  echo "ERROR: com.apple.SetupAssistant pre-seed did not persist" >&2
+  exit 1
+fi
+
+echo ""
+echo "=== Phase 7.5 complete ==="
 echo ""
 
 # =====================================================
@@ -520,7 +707,12 @@ echo "ec2-macos-init history cleared."
 # AMI to show the "Your computer was restarted because of a problem" dialog at
 # first boot, which can block System Settings UI automation during enrollment.
 echo "Clearing diagnostic reports so they don't get baked into the AMI..."
-/usr/bin/sudo /bin/rm -f /Library/Logs/DiagnosticReports/*.panic /Library/Logs/DiagnosticReports/*.ips 2>/dev/null || true
+# Use find rather than a glob. zsh errors on an unmatched glob and aborts the
+# whole command before rm runs, so when no .panic file existed the .ips removal
+# silently never happened and `|| true` hid it. Observed on 2026-10-07: three
+# .ips files survived into ami-0a72bc453a63ca035.
+/usr/bin/sudo /usr/bin/find /Library/Logs/DiagnosticReports -maxdepth 1 \
+  \( -name '*.panic' -o -name '*.ips' \) -delete 2>/dev/null || true
 echo "Diagnostic reports remaining:"
 /usr/bin/sudo /bin/ls /Library/Logs/DiagnosticReports/ 2>/dev/null | /usr/bin/grep -iE "panic|ips" || echo "  (none)"
 
