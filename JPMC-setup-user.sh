@@ -19,8 +19,14 @@
 # auto-login, disables screen saver, and creates the Jamf locationd
 # directory — pulling credentials from AWS Secrets Manager.
 #
-# Passwords are never written to disk, never appear in argv, and
+# Passwords are never written to disk and never persist in shell history, and
 # never live in a shell variable longer than the immediate command needs.
+#
+# HONEST EXCEPTION: `dscl . -passwd` and `sysadminctl -newPassword` below take
+# the password as a command-line argument, so it is briefly visible in `ps`.
+# Neither tool has a documented way to read it from stdin. These instances are
+# single-tenant and short-lived, but do not describe this script as keeping
+# passwords out of argv, because it does not.
 #
 # Run as ec2-user. In production, invoked via SSM (AWS-RunShellScript)
 # by the run_setup Lambda in the staging Step Functions pipeline.

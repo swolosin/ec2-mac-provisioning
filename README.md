@@ -4,6 +4,8 @@ Fully headless, automated Jamf MDM enrollment for EC2 Mac instances. Instances l
 
 Supports **macOS 14 (Sonoma)**, **macOS 15 (Sequoia)**, **macOS 26 (Tahoe)**, and **macOS 27 (Golden Gate)**.
 
+**Status:** macOS 14/15/26 validated at 20/20. **macOS 27.0 (26A428) validated 2026-10-09 at 8/8** on script version 1.1.0, including on a dedicated host carrying a FileVault-locked internal SSD. `ready_to_enrolled` was 123 seconds on every build.
+
 > **Origin:** This workflow was inspired by and built upon the AWS sample script `enroll-ec2-mac.scpt` (see `EC2_AWS_Build/`). The JPMC implementation rewrites the enrollment logic with IMDS retry, multi-version macOS support, persistent logging, cliclick fallback, S3 status reporting, and machine-readable status output for downstream AWS automation.
 
 ---
@@ -15,7 +17,6 @@ Supports **macOS 14 (Sonoma)**, **macOS 15 (Sequoia)**, **macOS 26 (Tahoe)**, an
 ├── JPMC-setup-user.sh           # Step 1 — run as ec2-user via SSM on a new instance
 ├── JPMC-stage-enrollment.sh     # Step 3 — run as ec2-user via SSM after SIP disable
 ├── JPMC-EC2-Enroll.applescript  # Step 4 — downloaded and compiled by the stage script
-├── jpmc_pwpolicy.sh             # Password policy helper (standalone, optional)
 └── EC2_AWS_Build/               # Original AWS sample scripts (reference only)
 ```
 
@@ -367,6 +368,20 @@ Panes observed on macOS 27.0: Accessibility → **Apple ID sign-in** → Age (ch
 
 The Apple ID pane cannot be answered headlessly. And `tell application settingsApp to activate` does **not** win the foreground back from Buddy. That was tested.
 
+#### Apple's own position: pane skipping requires Automated Device Enrollment
+
+This is the authoritative basis for the whole approach. On [Apple Developer Forums thread 828905](https://developer.apple.com/forums/thread/828905), an Apple Systems Engineer states:
+
+> "The Age Range Setup Assistant pane can only be skipped when using Automated Device Enrollment."
+
+backed by the macOS Tahoe 26 enterprise release notes:
+
+> "The new Age Range setup pane is automatically skipped for devices using Automated Device Enrollment."
+
+EC2 Mac instances **can never be in Apple Business Manager**, so Automated Device Enrollment is permanently unavailable, so the Age Range pane can never be skipped by any supported mechanism. The same engineer confirmed `AgeAssurance` and `AgeBasedSafetySettings` are not real skip keys, and local inspection agrees: the only Age Range strings in the Setup Assistant binary are `userAgeRangeForAccount:` and `LastSeenAgeRangeSelectionProductVersion`, the latter being the one local lever and already covered by Layer B.
+
+**Layer C is therefore not a workaround around a supported path. It is the only available mechanism.**
+
 #### What does not work, and why — do not retry these
 
 | Approach | Result |
@@ -416,7 +431,36 @@ DidSeeSyncSetup  DidSeeSyncSetup2  DidSeeTermsOfAddress  DidSeeTouchIDSetup
 
 Several panes are gated on `LastSeen*ProductVersion` strings instead, which **re-trigger on every OS version bump**. That is why an AMI built in September still showed panes. Those values are computed from `sw_vers` at runtime rather than hardcoded, so a 27.1 or 28.0 AMI seeds itself correctly.
 
-The **Liquid Glass pane has no skip key at all.** The macOS 27.0.1 Setup Assistant binary contains `GlassSelection`, `GlassSelectionFlowItem`, `GlassSelectionViewController` and `LastSeenGlassTintUpsellProductVersion`, but nothing matching in the skip-key vocabulary. Layer B is the only way to suppress it.
+**On Liquid Glass — corrected 2026-10-09.** An earlier version of this document claimed the Liquid Glass pane has no skip key. **That is wrong.** Apple's [`other/skipkeys.yaml`](https://github.com/apple/device-management/blob/release/other/skipkeys.yaml) now defines `LiquidGlass`, introduced **macOS 27.0**, and Apple's `CHANGES.md` lists it as one of three new keys this release alongside `AccessibilityAppearance` and `DeviceFeaturesTour`.
+
+Two caveats before relying on it. The literal string `LiquidGlass` does **not** appear in the Setup Assistant binary, `mdmclient`, or `ManagedClient` on 27.0.1, whereas `Biometric`, `EnableLockdownMode`, `TermsOfAddress`, `Intelligence`, `Welcome` and `SoftwareUpdate` all do. The skip-key plumbing is Swift (`MDMSkipKeyManagerProtocol`), so literals may simply be mangled. So the key is documented by Apple but unverified on-device. And a skip key only takes effect through a profile, which is the thing we do not have at Buddy time. Layer B remains how we suppress this pane today.
+
+#### Apple's real macOS skip-key vocabulary
+
+If a `SkipSetupItems` array is ever built here, use these. Apple's schema defines **54 skip keys, of which only 23 apply to macOS.** A previous 39-key list in this repo used iOS-only and incorrect names.
+
+| Key | macOS | | Key | macOS |
+|---|---|---|---|---|
+| `FileVault` | 10.10 | | `AppStore` | 11.1 |
+| `Location` | 10.11 | | `TermsOfAddress` | 13.0 |
+| `Siri` | 10.12 | | `EnableLockdownMode` | 14.0 |
+| `Biometric` | 10.12.4 | | `Wallpaper` | 14.1 |
+| `Payment` | 10.12.4 | | `Intelligence` | 15.0 |
+| `iCloudDiagnostics` | 10.12.4 | | `UnlockWithWatch` | 15.0 |
+| `Privacy` | 10.13.4 | | `Welcome` | 15.0 |
+| `iCloudStorage` | 10.13.4 | | `SoftwareUpdate` | 15.4 |
+| `DisplayTone` | 10.13.6 | | `OSShowcase` | 26.1 |
+| `Appearance` | 10.14 | | `UpdateCompleted` | 26.1 |
+| `ScreenTime` | 10.15 | | `LiquidGlass` | 27.0 |
+| `Accessibility` | 11.0 | | | |
+
+Common mistakes, all of which were in the old list: it is `Biometric` not `TouchID`, `EnableLockdownMode` not `LockdownMode`, and `Payment` not `ApplePay`. `Diagnostics`, `AppleID`, `TOS`, `Restore`, `TapToSetup`, `WatchMigration`, `DeviceToDeviceMigration`, `Keyboards`, `ExpressLanguage`, `PreferredLanguage`, `SpokenLanguage`, `Registration`, `ScreenSaver`, `Update` and `TrueTone` are **not** macOS skip keys.
+
+Also note from Apple's [payload schema](https://github.com/apple/device-management/blob/release/mdm/profiles/com.apple.SetupAssistant.managed.yaml): `SkipSetupItems` was introduced for **macOS 15.0**, and every older individual boolean (`SkipCloudSetup`, `SkipSiriSetup`, `SkipTouchIDSetup` and friends) is **deprecated as of 15.0**. On macOS 26 and 27, only `SkipSetupItems` is relevant.
+
+The `Accessibility` key carries a note worth quoting, because it describes our exact situation:
+
+> "This key doesn't skip the Accessibility pane in Setup Assistant during initial device set up. It does skip the Accessibility pane when Setup Assistant runs due to a new user log in."
 
 **Layer C — kill it at runtime.** `quitSetupAssistant()` in `JPMC-EC2-Enroll.applescript` runs at the top of `installProfile` and again at the top of `enterAdminPassword`, and kills Buddy outright if it is on screen. This is the only layer verified to clear it unconditionally. Measured on `i-0193db62a18036255`: `killall` succeeded, process count went to `0`, frontmost went to none, and it did **not** respawn.
 
@@ -604,7 +648,8 @@ When `PROD_FLAG="1"` is set in the stage script, after successful enrollment the
 
 ## Security
 
-- Passwords are never written to disk, never appear in env vars, or shell history
+- Passwords are never written to disk and never persist in shell history
+- **Known exceptions, stated honestly.** `do shell script` executes `sh -c '<script text>'`, so anything interpolated into a command string is briefly visible in that process's arguments. Three places do this today: `getSecret()` round-trips the full `SecretString` through `echo`, `getJamfToken()` passes the Jamf client secret to `curl`, and `JPMC-setup-user.sh` passes the admin password to `dscl -passwd` and `sysadminctl -newPassword`. The first two are fixable by keeping the value inside a single shell pipeline; the last two have no documented stdin equivalent. These instances are single-tenant and short-lived, but the exposure is real and this document will not claim otherwise
 - The top-level error handler redacts the admin password out of error text before anything is logged or uploaded. `do shell script` failures can echo the failing command, and some of those commands carry the password. The value is held in memory only for the duration of the run and cleared when it ends
 - Credentials live only in AppleScript runtime memory during enrollment
 - Admin password is placed on clipboard for SecurityAgent, then immediately cleared twice

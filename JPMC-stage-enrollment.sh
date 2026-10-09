@@ -561,11 +561,17 @@ echo ""
 #   That is why an AMI built in September still showed panes. Those values are
 #   computed from sw_vers at runtime so a 27.1 or 28.0 AMI seeds itself.
 #
-#   The Liquid Glass pane has NO SkipSetupItems key at all. The Setup Assistant
-#   binary on macOS 27.0.1 contains GlassSelection, GlassSelectionFlowItem,
-#   GlassSelectionViewController and LastSeenGlassTintUpsellProductVersion, but
-#   no matching entry in the skip-key vocabulary. Layer B is the only way to
-#   suppress it.
+#   On Liquid Glass, corrected 2026-10-09: an earlier comment here claimed the
+#   pane has NO skip key. That was wrong. Apple's other/skipkeys.yaml defines
+#   LiquidGlass, introduced macOS 27.0:
+#     https://github.com/apple/device-management/blob/release/other/skipkeys.yaml
+#   Two caveats. The literal string "LiquidGlass" does not appear in the Setup
+#   Assistant binary, mdmclient or ManagedClient on 27.0.1, while Biometric,
+#   EnableLockdownMode, TermsOfAddress, Intelligence, Welcome and SoftwareUpdate
+#   all do; the plumbing is Swift (MDMSkipKeyManagerProtocol) so literals may be
+#   mangled. And a skip key only applies through a profile, which is exactly
+#   what we do not have at Buddy time. So Layer B is still how we suppress this
+#   pane in practice, but not because no key exists.
 #
 # Layer C (runtime, in JPMC-EC2-Enroll.applescript): quitSetupAssistant() runs
 #   at the top of installProfile and kills Buddy outright if it is on screen.
@@ -630,8 +636,10 @@ done
 
 # Version-keyed panes. These re-present whenever the recorded version differs
 # from the running OS, which is the mechanism that defeated the previous AMI.
-# LastSeenGlassTintUpsellProductVersion is the Liquid Glass pane, which has no
-# SkipSetupItems key and can only be suppressed here.
+# LastSeenGlassTintUpsellProductVersion is the Liquid Glass pane. A LiquidGlass
+# SkipSetupItems key does exist as of macOS 27.0, but it needs a profile we do
+# not have at Buddy time, so this pre-seed is how we suppress it. See the
+# Phase 7.5 header.
 for sa_vkey in \
   LastSeenBuddyProductVersion LastSeenCloudProductVersion \
   LastSeenDiagnosticsProductVersion LastSeenAgeRangeSelectionProductVersion \
